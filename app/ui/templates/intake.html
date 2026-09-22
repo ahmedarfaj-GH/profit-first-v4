@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}إدخال بيانات — {{ entity.name }}{% endblock %}
+{% block content %}
+<h1>إدخال بيانات فترة مالية — {{ entity.name }}</h1>
+<p class="muted">المعرّف: {{ entity.id }} · العملة: {{ entity.currency }}</p>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card">
+  <h2>رفع من ملف Excel (القالب الموحّد)</h2>
+  <p class="muted">
+    حمّل <a href="/entities/{{ entity.id }}/template.xlsx">القالب الرسمي</a>، عبّئه ببيانات الفترة، وارفعه هنا.
+    نفس بنية "قالب تجميع البيانات" المعتمد — لا تغيّر عمود "الرقم التسلسلي" ولا عمود "القيمة".
+  </p>
+  <form method="post" action="/entities/{{ entity.id }}/runs/upload" enctype="multipart/form-data" class="grid-form">
+    <label>ملف Excel (.xlsx)
+      <input type="file" name="file" accept=".xlsx,.xlsm" required>
+    </label>
+    <button type="submit">ارفع واحسب</button>
+  </form>
+</section>
+
+<section class="card">
+<h2>أو إدخال يدوي</h2>
+<form method="post" action="/entities/{{ entity.id }}/runs" class="grid-form">
+  <label>بداية الفترة
+    <input type="date" name="period_start" required>
+  </label>
+  <label>نهاية الفترة
+    <input type="date" name="period_end" required>
+  </label>
+
+  <fieldset>
+    <legend>النقد التشغيلي</legend>
+    <label>{{ fields.opening_cash_balance }}
+      <input type="number" step="0.01" min="0" name="opening_cash_balance" required>
+    </label>
+    <label>{{ fields.total_collections }}
+      <input type="number" step="0.01" min="0" name="total_collections" required>
+    </label>
+    <label>{{ fields.total_operating_expenses_paid }}
+      <input type="number" step="0.01" min="0" name="total_operating_expenses_paid" required>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>الالتزامات المستحقة</legend>
+    <label>{{ fields.payroll_due }}
+      <input type="number" step="0.01" min="0" name="payroll_due" required>
+    </label>
+    <label>{{ fields.vat_due }}
+      <input type="number" step="0.01" min="0" name="vat_due" required>
+    </label>
+    <label>{{ fields.royalty_due }}
+      <input type="number" step="0.01" min="0" name="royalty_due" required>
+    </label>
+    <label>{{ fields.suppliers_due }}
+      <input type="number" step="0.01" min="0" name="suppliers_due" required>
+    </label>
+    <label>{{ fields.other_short_term_due }}
+      <input type="number" step="0.01" min="0" name="other_short_term_due" required>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>الاحتياطي</legend>
+    <label>{{ fields.operational_reserve_target }}
+      <input type="number" step="0.01" min="0" name="operational_reserve_target" required>
+    </label>
+  </fieldset>
+
+  <button type="submit">احسب</button>
+</form>
+</section>
+{% endblock %}

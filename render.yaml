@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: profitfirst
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: DATABASE_URL
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: UI_LOGIN_USER
+        sync: false
+      - key: UI_LOGIN_PASSWORD_HASH
+        sync: false

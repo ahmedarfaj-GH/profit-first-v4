@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}الرؤية المجمّعة{% endblock %}
+{% block content %}
+<h1>الرؤية المجمّعة على مستوى الشبكة</h1>
+<p class="muted">من الكيان: {{ summary.root_entity_id }}</p>
+
+<section class="card">
+  <table class="kv">
+    <tr><td>إجمالي السيولة المتاحة على مستوى الشبكة</td><td><span dir="ltr">{{ "%.2f"|format(summary.network_total_estimated_available_liquidity) }}</span></td></tr>
+    <tr><td>إجمالي الالتزامات المستحقة على مستوى الشبكة</td><td><span dir="ltr">{{ "%.2f"|format(summary.network_total_due_obligations) }}</span></td></tr>
+  </table>
+</section>
+
+<section class="card">
+  <h2>الشجرة</h2>
+  {% macro render_node(node) %}
+  <li>
+    <div class="tree-node">
+      <strong>{{ node.name }}</strong>
+      <span class="muted">({{ node.entity_id }} · {{ node.type }})</span>
+      {% if node.estimated_available_liquidity is not none %}
+      <div class="tree-node-stats">
+        <span>السيولة المتاحة: <strong dir="ltr" class="{{ 'text-danger' if node.estimated_available_liquidity < 0 else 'text-ok' }}">{{ "%.2f"|format(node.estimated_available_liquidity) }}</strong></span>
+        <span>إجمالي الالتزامات: <span dir="ltr">{{ "%.2f"|format(node.total_due_obligations) }}</span></span>
+        <a href="/runs/{{ node.latest_run_id }}">آخر عملية حساب</a>
+        <a href="/runs?entity_id={{ node.entity_id }}">كل عمليات هذا الكيان</a>
+      </div>
+      {% else %}
+      <div class="tree-node-stats"><span class="muted">لا يوجد بيانات بعد لهذا الكيان</span></div>
+      {% endif %}
+    </div>
+    {% if node.children %}
+    <ul>
+      {% for c in node.children %}{{ render_node(c) }}{% endfor %}
+    </ul>
+    {% endif %}
+  </li>
+  {% endmacro %}
+  <ul class="tree">
+    {{ render_node(summary.tree) }}
+  </ul>
+</section>
+{% endblock %}

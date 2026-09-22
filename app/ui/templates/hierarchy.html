@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}الهرمية — Profit First{% endblock %}
+{% block content %}
+<h1>هرمية الكيانات</h1>
+
+<section class="card">
+  <h2>إضافة كيان جديد</h2>
+  <form method="post" action="/entities" class="grid-form">
+    <label>المعرّف (id)
+      <input type="text" name="id" required placeholder="مثال: BRANCH-01" pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,63}" title="حروف إنجليزية وأرقام و- و_ فقط">
+    </label>
+    <label>الاسم
+      <input type="text" name="name" required placeholder="اسم الكيان">
+    </label>
+    <label>النوع
+      <select name="type" id="type_select">
+        {% for value, label in entity_type_labels.items() %}
+        <option value="{{ value }}">{{ label }}</option>
+        {% endfor %}
+        <option value="__other__">أخرى (حدد)</option>
+      </select>
+      <input type="text" id="type_other" name="type_other" class="is-hidden" placeholder="اكتب النوع" maxlength="50">
+    </label>
+    <label>الكيان الأب (اختياري)
+      <select name="parent_id">
+        <option value="">— بدون —</option>
+        {% for e in entities %}
+        <option value="{{ e.id }}">{{ e.name }} ({{ e.id }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>العملة
+      <input type="text" name="currency" value="SAR" maxlength="3">
+    </label>
+    <button type="submit">إضافة</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>الكيانات الحالية</h2>
+  {% if not entities %}
+  <p class="muted">لا يوجد كيانات بعد — أضف واحدًا من النموذج أعلاه.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>المعرّف</th><th>الاسم</th><th>النوع</th><th>الأب</th>
+        <th>آخر سيولة متاحة</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entities %}
+      <tr>
+        <td>{{ e.id }}</td>
+        <td>{{ e.name }}</td>
+        <td>{{ entity_type_labels.get(e.type, e.type) }}</td>
+        <td>{{ e.parent_id or "—" }}</td>
+        <td>
+          {% if latest.get(e.id) %}
+            <span dir="ltr">{{ "%.2f"|format(latest[e.id].liquidity.estimated_available_liquidity) }}</span> {{ e.currency }}
+          {% else %}
+            <span class="muted">لا يوجد بيانات بعد</span>
+          {% endif %}
+        </td>
+        <td class="actions">
+          <a href="/entities/{{ e.id }}/new-run">إدخال بيانات فترة</a>
+          {% if latest.get(e.id) %}
+          <a href="/runs/{{ latest[e.id].run_id }}">آخر نتيجة</a>
+          {% endif %}
+          <a href="/entities/{{ e.id }}/network-summary">الرؤية المجمّعة</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

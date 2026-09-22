@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}تسجيل الدخول — Profit First{% endblock %}
+{% block content %}
+<div class="login-box">
+  <h1>Profit First</h1>
+  <p class="muted">تسجيل دخول — بروتوتايب داخلي</p>
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <label>اسم المستخدم
+      <input type="text" name="username" required autofocus autocomplete="username">
+    </label>
+    <label>كلمة المرور
+      <input type="password" name="password" required autocomplete="current-password">
+    </label>
+    <button type="submit">دخول</button>
+  </form>
+</div>
+{% endblock %}

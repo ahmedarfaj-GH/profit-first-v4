@@ -1,0 +1,24 @@
+# secrets and local config
+.env
+.env.*
+!.env.example
+
+# databases
+*.db
+*.sqlite3
+
+# real financial data must never reach version control
+*.xlsx
+*.xlsm
+*.csv
+profit_first_export/
+
+# local artifacts
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.log
+tools/
+.claude/

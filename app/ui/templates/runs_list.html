@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}كل عمليات الحساب{% endblock %}
+{% block content %}
+<h1>سجل كل عمليات الحساب (كل القراءات)</h1>
+<p class="muted">كل عملية حساب تُحفظ دائمًا — هذا السجل الكامل بلا حذف، مرتّب من الأحدث.</p>
+
+<div class="filter-bar">
+  <form method="get" action="/runs" style="display:flex; gap:10px; align-items:center;">
+    <label style="margin:0;">تصفية حسب الكيان
+      <select name="entity_id" onchange="this.form.submit()">
+        <option value="">— كل الكيانات ({{ entities|length }}) —</option>
+        {% for eid, e in entities.items() %}
+        <option value="{{ eid }}" {% if eid == selected_entity_id %}selected{% endif %}>{{ e.name }} ({{ eid }})</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</div>
+
+{% if not runs %}
+<p class="muted">ما فيه أي عملية حساب محفوظة {{ "لهذا الكيان" if selected_entity_id else "بعد" }}.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>التاريخ</th><th>الكيان</th><th>الفترة</th><th>السيولة المتاحة</th><th>الحالة</th><th>المراجعة</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td>{{ r.created_at[:16].replace("T", " ") }}</td>
+      <td>{{ entities.get(r.entity_id).name if entities.get(r.entity_id) else r.entity_id }}</td>
+      <td>{{ r.period_start }} → {{ r.period_end }}</td>
+      <td class="{{ 'text-danger' if r.liquidity.estimated_available_liquidity < 0 else 'text-ok' }}">
+        <span dir="ltr">{{ "%.2f"|format(r.liquidity.estimated_available_liquidity) }}</span>
+      </td>
+      <td>{{ r.allocation.overall_status }}</td>
+      <td>
+        {% if reviews.get(r.run_id) %}
+        <span class="status-pill reviewed">{{ reviews[r.run_id] }}</span>
+        {% else %}
+        <span class="status-pill pending">بانتظار المراجعة</span>
+        {% endif %}
+      </td>
+      <td><a href="/runs/{{ r.run_id }}">عرض</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

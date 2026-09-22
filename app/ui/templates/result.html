@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}نتيجة {{ run.run_id }}{% endblock %}
+{% block content %}
+<h1>نتيجة الحساب — {{ entity.name }}</h1>
+<p class="muted">
+  {{ run.run_id }} · الفترة {{ run.period_start }} → {{ run.period_end }}
+  · بصمة البيانات: <code>{{ run.dataset_hash[:16] }}…</code>
+</p>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card">
+  <h2>السيولة</h2>
+  <table class="kv">
+    <tr><td>صافي النقد التشغيلي</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.net_operating_cash) }}</span></td></tr>
+    <tr><td>إجمالي الالتزامات المستحقة</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.total_due_obligations) }}</span></td></tr>
+    <tr><td>الاحتياطي التشغيلي المستهدف</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.operational_reserve_target) }}</span></td></tr>
+    <tr class="highlight">
+      <td>السيولة المتاحة المقدّرة</td>
+      <td><span dir="ltr">{{ "%.2f"|format(run.liquidity.estimated_available_liquidity) }}</span></td>
+    </tr>
+  </table>
+</section>
+
+<section class="card">
+  <h2>التخصيص بالأولوية (Waterfall)</h2>
+  <div class="status-banner status-{{ run.allocation.overall_status|lower }}">
+    {{ run.allocation.overall_status }}
+    {% if run.allocation.total_funding_gap > 0 %}— عجز تمويلي: {{ "%.2f"|format(run.allocation.total_funding_gap) }}{% endif %}
+    {% if run.allocation.surplus_discretionary > 0 %}— فائض: {{ "%.2f"|format(run.allocation.surplus_discretionary) }}{% endif %}
+  </div>
+
+  <div class="waterfall">
+    {% for a in run.allocation.allocations %}
+    <div class="wf-row wf-{{ a.status|lower }}">
+      <div class="wf-label">
+        {{ a.priority }}. {{ a.name_ar }}
+        {% if a.protected %}<span class="lock" title="بند محمي">🔒</span>{% endif %}
+      </div>
+      <div class="wf-bar-track">
+        {% if a.target %}
+        <div class="wf-bar" style="width: {{ (a.allocated / a.target * 100) if a.target else 0 }}%"></div>
+        {% elif a.allocated > 0 %}
+        <div class="wf-bar wf-surplus" style="width: 100%"></div>
+        {% endif %}
+      </div>
+      <div class="wf-amount" dir="ltr">
+        {{ "%.2f"|format(a.allocated) }}{% if a.target %} / {{ "%.2f"|format(a.target) }}{% endif %}
+      </div>
+      <div class="wf-status">{{ a.status }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <h3>التفسير</h3>
+  <ul class="explain">
+    {% for line in run.allocation.explainability %}
+    <li>{{ line }}</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>المراجعة البشرية</h2>
+  {% if review %}
+  <table class="kv">
+    <tr><td>القرار</td><td>{{ review.decision }}</td></tr>
+    <tr><td>تمت المراجعة بواسطة</td><td>{{ review.decided_by }}</td></tr>
+    {% if review.override %}<tr><td>تعديل</td><td>{{ review.override }}</td></tr>{% endif %}
+    {% if review.justification %}<tr><td>التبرير</td><td>{{ review.justification }}</td></tr>{% endif %}
+    <tr><td>التوقيت</td><td>{{ review.decided_at }}</td></tr>
+  </table>
+  {% else %}
+  <p class="muted">لم تتم المراجعة بعد. أي بند محمي 🔒 لا يمكن تعديله بدون تبرير غير فارغ.</p>
+  <form method="post" action="/runs/{{ run.run_id }}/review" class="grid-form">
+    <label>القرار
+      <select name="decision" required>
+        <option value="APPROVE">Approve</option>
+        <option value="MODIFY">Modify</option>
+        <option value="REJECT">Reject</option>
+      </select>
+    </label>
+    <label>اسم المُراجِع
+      <input type="text" name="decided_by" required>
+    </label>
+    <label>بند التعديل (اختياري)
+      <select name="override_bucket">
+        <option value="">— بدون تعديل —</option>
+        {% for a in run.allocation.allocations if a.bucket_id != "surplus_discretionary" %}
+        <option value="{{ a.bucket_id }}">{{ a.name_ar }}{% if a.protected %} 🔒{% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>القيمة الجديدة (اختياري)
+      <input type="number" step="0.01" name="override_value">
+    </label>
+    <label>التبرير (إلزامي عند تعديل بند محمي)
+      <textarea name="justification" rows="2"></textarea>
+    </label>
+    <button type="submit">تسجيل القرار</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

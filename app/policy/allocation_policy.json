@@ -1,0 +1,66 @@
+{
+  "policy_id": "AP-V1",
+  "description": "Allocation Policy V1 - defines buckets, priority order, and rules for allocating Estimated Available Liquidity against obligations.",
+  "priority_order": [
+    "payroll",
+    "vat",
+    "royalty",
+    "suppliers",
+    "other_short_term",
+    "operational_reserve",
+    "surplus_discretionary"
+  ],
+  "buckets": [
+    {
+      "bucket_id": "payroll",
+      "name_ar": "الرواتب والالتزامات البشرية",
+      "priority": 1,
+      "mandatory": true,
+      "protected": true
+    },
+    {
+      "bucket_id": "vat",
+      "name_ar": "ضريبة القيمة المضافة",
+      "priority": 2,
+      "mandatory": true,
+      "protected": true
+    },
+    {
+      "bucket_id": "royalty",
+      "name_ar": "الرويالتي / حقوق الامتياز المستحقة",
+      "priority": 3,
+      "mandatory": true,
+      "protected": true
+    },
+    {
+      "bucket_id": "suppliers",
+      "name_ar": "الموردون",
+      "priority": 4,
+      "mandatory": true,
+      "protected": false
+    },
+    {
+      "bucket_id": "other_short_term",
+      "name_ar": "التزامات قصيرة الأجل أخرى",
+      "priority": 5,
+      "mandatory": true,
+      "protected": false
+    },
+    {
+      "bucket_id": "operational_reserve",
+      "name_ar": "الاحتياطي التشغيلي",
+      "priority": 6,
+      "mandatory": true,
+      "protected": true
+    },
+    {
+      "bucket_id": "surplus_discretionary",
+      "name_ar": "الفائض / الاستخدامات الاختيارية",
+      "priority": 7,
+      "mandatory": false,
+      "protected": false
+    }
+  ],
+  "shortfall_rule": "sequential_by_priority",
+  "notes": "When Net Operating Cash is insufficient to fully fund a bucket at its priority position, that bucket receives whatever remains, is marked PARTIAL, and all lower-priority buckets receive 0 and are marked UNFUNDED (Funding Gap). Human review is required whenever any bucket is PARTIAL or UNFUNDED."
+}
