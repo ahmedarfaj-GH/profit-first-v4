@@ -17,8 +17,12 @@ from app.auth import (
     verify_password,
 )
 from app.config import is_production
-from app.engine.allocation_engine import load_policy, run_allocation, validate_override
-from app.engine.liquidity_engine import compute_liquidity
+from app.allocation import compute_run, plan_policy_id
+from app.engine.allocation_engine import validate_override
+from app.engine.distribution_plan import (
+    BASIS_FIXED, BASIS_INPUT, BASIS_PERCENT, INPUT_FIELD_LABELS_AR, MAX_LINES, basis_label, default_lines,
+    normalize_lines, run_plan_allocation,
+)
 from app.engine.xlsx_template import TemplateParseError, build_template_workbook, parse_intake_workbook
 from app.validation import is_finite_non_negative, is_valid_entity_id, validate_period
 
@@ -67,6 +71,8 @@ ROLE_LABELS_AR = {
 CAN_EDIT_DATA = {"owner", "accountant"}   # entities and period data
 CAN_REVIEW = {"owner", "treasurer"}       # the person who enters data doesn't approve it
 CAN_MANAGE_TEAM = {"owner"}
+CAN_DESIGN_PLAN = {"owner", "accountant"}
+CAN_APPROVE_PLAN = {"owner"}              # and never someone who edited or submitted the version
 
 
 def _redirect(location: str) -> HTTPException:
@@ -114,6 +120,8 @@ def _perms(user: Optional[dict]) -> dict:
         "edit_data": role in CAN_EDIT_DATA,
         "review": role in CAN_REVIEW,
         "manage_team": role in CAN_MANAGE_TEAM,
+        "design_plan": role in CAN_DESIGN_PLAN,
+        "approve_plan": role in CAN_APPROVE_PLAN,
         "platform_admin": role == db.PLATFORM_ADMIN_ROLE,
     }
 
@@ -332,15 +340,13 @@ async def submit_run_from_upload(request: Request, entity_id: str, file: UploadF
     if any(not is_finite_non_negative(v) or v > MAX_AMOUNT for v in values.values()):
         return error_page("الملف يحتوي قيمة مالية غير صالحة (سالبة أو غير محدودة أو ضخمة جدًا)")
 
-    liquidity = compute_liquidity(values)
-    policy = load_policy()
-    allocation = run_allocation(values, liquidity, policy)
+    liquidity, allocation = compute_run(user["org_id"], values)
 
     run_id = _new_run_id(entity_id)
     dataset_hash = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
     db.insert_run(
         run_id, entity_id, parsed["period_start"], parsed["period_end"], dataset_hash,
-        values, liquidity, allocation, policy["policy_id"],
+        values, liquidity, allocation, allocation["policy_id"],
     )
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -389,13 +395,12 @@ def submit_run(
                 f"القيمة غير صالحة لحقل \"{FIELD_LABELS_AR.get(key, key)}\": يجب أن تكون رقمًا غير سالب"
             )
 
-    liquidity = compute_liquidity(values)
-    policy = load_policy()
-    allocation = run_allocation(values, liquidity, policy)
+    liquidity, allocation = compute_run(user["org_id"], values)
 
     run_id = _new_run_id(entity_id)
     dataset_hash = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
-    db.insert_run(run_id, entity_id, period_start, period_end, dataset_hash, values, liquidity, allocation, policy["policy_id"])
+    db.insert_run(run_id, entity_id, period_start, period_end, dataset_hash, values, liquidity, allocation,
+                  allocation["policy_id"])
 
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -589,3 +594,169 @@ def admin_set_organization_status(request: Request, org_id: str, status: str = F
         raise HTTPException(status_code=404, detail="Organization not found")
     db.set_organization_status(org_id, status)
     return RedirectResponse("/admin", status_code=303)
+
+
+# --- distribution plans ------------------------------------------------------------
+PLAN_STATUS_LABELS_AR = {
+    "draft": "مسودة",
+    "pending": "بانتظار الاعتماد",
+    "active": "معتمد (ساري)",
+    "superseded": "إصدار سابق",
+}
+PLAN_EVENT_LABELS_AR = {
+    "created": "أُنشئت المسودة",
+    "edited": "عُدّلت البنود",
+    "submitted": "أُرسلت للاعتماد",
+    "approved": "اعتُمدت وأصبحت سارية",
+    "rejected": "أُعيدت للتعديل",
+}
+BLANK_PLAN_ROWS = 3
+
+
+def _basis_options() -> list[tuple[str, str]]:
+    return [(BASIS_PERCENT, "نسبة % من التحصيلات"), (BASIS_FIXED, "مبلغ ثابت لكل فترة")] + [
+        (f"{BASIS_INPUT}:{field}", f"من بيانات الفترة: {label}") for field, label in INPUT_FIELD_LABELS_AR.items()
+    ]
+
+
+def _parse_plan_form(form) -> list[dict]:
+    """Rows come as parallel lists; blank-named rows are ignored and the rest are
+    ordered by their priority number (ties keep their on-screen order)."""
+    columns = [form.getlist(k) for k in ("line_name", "line_basis", "line_value", "line_protected", "line_order")]
+    if len({len(c) for c in columns}) != 1 or len(columns[0]) > MAX_LINES + BLANK_PLAN_ROWS:
+        raise ValueError("بيانات النموذج غير مكتملة — أعد تحميل الصفحة")
+    rows = []
+    for position, (name, basis, value, protected, order) in enumerate(zip(*columns)):
+        if not name.strip():
+            continue
+        try:
+            priority = float(order) if order.strip() else float(position + 1)
+            number = float(value) if value.strip() else None
+        except ValueError:
+            raise ValueError(f"«{name.strip()}»: الأولوية والقيمة يجب أن تكونا أرقامًا") from None
+        if not math.isfinite(priority):
+            raise ValueError(f"«{name.strip()}»: الأولوية غير صالحة")
+        kind, _, field = basis.partition(":")
+        rows.append((priority, position, {
+            "name": name, "basis": kind, "value": number, "input_field": field or None, "protected": protected == "1",
+        }))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return normalize_lines([r[2] for r in rows])
+
+
+def _submitted_rows(form) -> list[dict]:
+    """The rows as typed, for redisplay after a validation error."""
+    columns = [form.getlist(k) for k in ("line_name", "line_basis", "line_value", "line_protected")]
+    rows = []
+    for name, basis, value, protected in list(zip(*columns))[: MAX_LINES + BLANK_PLAN_ROWS]:
+        if name.strip():
+            kind, _, field = basis.partition(":")
+            rows.append({"name": name, "basis": kind, "value": value, "input_field": field or None,
+                         "protected": protected == "1"})
+    return rows
+
+
+def _plan_preview(plan: dict, org_id: str) -> Optional[dict]:
+    """How this version would have allocated the organization's latest period data."""
+    run = db.get_latest_org_run(org_id=org_id)
+    if not run:
+        return None
+    allocation = run_plan_allocation(run["inputs"], run["liquidity"], plan["lines"], plan_policy_id(plan))
+    return {"run": run, "allocation": allocation}
+
+
+def _plan_page(request: Request, user: dict, plan: dict, error: Optional[str] = None,
+               status_code: int = 200, lines: Optional[list] = None):
+    events = db.list_plan_events(plan["id"])
+    return render(
+        request, "plan.html", user, status_code=status_code, plan=plan, error=error,
+        lines=lines if lines is not None else plan["lines"], blank_rows=BLANK_PLAN_ROWS,
+        events=events, preview=_plan_preview(plan, user["org_id"]), basis_options=_basis_options(),
+        designers={e["actor"] for e in events if e["action"] in ("edited", "submitted")},
+        basis_label=basis_label, status_labels=PLAN_STATUS_LABELS_AR, event_labels=PLAN_EVENT_LABELS_AR,
+        last_rejection=next((e for e in reversed(events) if e["action"] == "rejected"), None)
+        if plan["status"] == "draft" else None,
+    )
+
+
+def _get_org_plan(plan_id: str, user: dict) -> dict:
+    plan = db.get_plan(plan_id, org_id=user["org_id"])
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return plan
+
+
+@router.get("/plans")
+def plans_page(request: Request):
+    user = require_org_user(request)
+    org_id = user["org_id"]
+    active = db.get_active_plan(org_id)
+    return render(
+        request, "plans.html", user, active=active, open_plan=db.get_open_plan(org_id),
+        plans=db.list_plans(org_id), default_lines=None if active else default_lines(),
+        basis_label=basis_label, status_labels=PLAN_STATUS_LABELS_AR,
+    )
+
+
+@router.post("/plans")
+def plan_create_draft(request: Request):
+    user = require_org_user(request, CAN_DESIGN_PLAN)
+    active = db.get_active_plan(user["org_id"])
+    plan_id = db.create_draft_plan(user["org_id"], active["lines"] if active else default_lines(), user["username"])
+    if not plan_id:  # a version is already being worked on — continue with that one
+        open_plan = db.get_open_plan(user["org_id"])
+        return RedirectResponse(f"/plans/{open_plan['id']}" if open_plan else "/plans", status_code=303)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.get("/plans/{plan_id}")
+def plan_page(request: Request, plan_id: str):
+    user = require_org_user(request)
+    return _plan_page(request, user, _get_org_plan(plan_id, user))
+
+
+@router.post("/plans/{plan_id}/lines")
+async def plan_save_lines(request: Request, plan_id: str):
+    user = require_org_user(request, CAN_DESIGN_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    form = await request.form()
+    try:
+        lines = _parse_plan_form(form)
+    except ValueError as e:
+        return _plan_page(request, user, plan, error=str(e), status_code=400, lines=_submitted_rows(form))
+    if not db.update_draft_lines(plan_id, user["org_id"], lines, user["username"]):
+        return _plan_page(request, user, plan, error="لا يمكن تعديل هذا الإصدار — التعديل على المسودات فقط",
+                          status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/submit")
+def plan_submit(request: Request, plan_id: str):
+    user = require_org_user(request, CAN_DESIGN_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    if not db.submit_plan(plan_id, user["org_id"], user["username"]):
+        return _plan_page(request, user, plan, error="هذا الإصدار ليس مسودة", status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/approve")
+def plan_approve(request: Request, plan_id: str):
+    user = require_org_user(request, CAN_APPROVE_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    if plan["status"] == "pending" and user["username"] in db.plan_designers(plan_id):
+        return _plan_page(request, user, plan, status_code=403,
+                          error="لا يمكنك اعتماد إصدار شاركت في تعديله أو أرسلته — يلزم اعتماد مالك آخر (مصادقة من شخصين)")
+    if not db.approve_plan(plan_id, user["org_id"], user["username"]):
+        return _plan_page(request, user, plan, error="هذا الإصدار ليس بانتظار الاعتماد", status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/reject")
+def plan_reject(request: Request, plan_id: str, note: str = Form("", max_length=1000)):
+    user = require_org_user(request, CAN_APPROVE_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    if not note.strip():
+        return _plan_page(request, user, plan, error="اكتب سبب الإعادة للتعديل", status_code=400)
+    if not db.reject_plan(plan_id, user["org_id"], user["username"], note.strip()):
+        return _plan_page(request, user, plan, error="هذا الإصدار ليس بانتظار الاعتماد", status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)

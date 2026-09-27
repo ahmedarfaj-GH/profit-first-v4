@@ -2,7 +2,8 @@
 Allocation Engine
 -----------------
 Allocates Net Operating Cash sequentially across buckets by priority
-(waterfall, not pro-rata), per the allocation policy. Each bucket is either
+(waterfall, not pro-rata), per the allocation policy: either the built-in
+default (AP-V1) or an organization's approved distribution plan. Each bucket is either
 FULLY_FUNDED, PARTIAL, UNFUNDED, or NOT_APPLICABLE (zero target).
 
 Protected buckets (payroll, VAT, royalty, operational reserve) are never
@@ -21,28 +22,43 @@ def load_policy() -> dict:
         return json.load(f)
 
 
+# Where the default policy (AP-V1) takes each bucket's target from the period data.
+LEGACY_TARGET_FIELDS = {
+    "payroll": "payroll_due",
+    "vat": "vat_due",
+    "royalty": "royalty_due",
+    "suppliers": "suppliers_due",
+    "other_short_term": "other_short_term_due",
+    "operational_reserve": "operational_reserve_target",
+}
+
+
 def run_allocation(inputs: dict, liquidity: dict, policy: dict) -> dict:
-    net_operating_cash = liquidity["net_operating_cash"]
+    """Allocation under the built-in default policy (AP-V1)."""
+    lines = [
+        {
+            "bucket_id": b["bucket_id"],
+            "name_ar": b["name_ar"],
+            "target": float(inputs.get(LEGACY_TARGET_FIELDS[b["bucket_id"]], 0) or 0),
+            "mandatory": b.get("mandatory", False),
+            "protected": b.get("protected", False),
+        }
+        for b in sorted(policy["buckets"], key=lambda b: b["priority"])
+        if b["bucket_id"] != "surplus_discretionary"
+    ]
+    return allocate_waterfall(liquidity["net_operating_cash"], lines, policy["policy_id"])
 
-    targets = {
-        "payroll": inputs.get("payroll_due", 0),
-        "vat": inputs.get("vat_due", 0),
-        "royalty": inputs.get("royalty_due", 0),
-        "suppliers": inputs.get("suppliers_due", 0),
-        "other_short_term": inputs.get("other_short_term_due", 0),
-        "operational_reserve": inputs.get("operational_reserve_target", 0),
-    }
 
-    bucket_order = [b["bucket_id"] for b in sorted(policy["buckets"], key=lambda b: b["priority"])]
-
+def allocate_waterfall(net_operating_cash: float, lines: list, policy_id: str) -> dict:
+    """Fills `lines` in order (their priority) from Net Operating Cash. Each line
+    carries bucket_id, name_ar, target and protected, and optionally mandatory
+    and basis_label (how its target was set)."""
     pool = net_operating_cash
     allocations = []
     funding_gap_total = 0.0
 
-    for bucket_id in bucket_order:
-        if bucket_id == "surplus_discretionary":
-            continue
-        target = float(targets.get(bucket_id, 0) or 0)
+    for priority, line in enumerate(lines, start=1):
+        target = float(line["target"] or 0)
         if target <= 0:
             status = "NOT_APPLICABLE"
             allocated = 0.0
@@ -60,23 +76,25 @@ def run_allocation(inputs: dict, liquidity: dict, policy: dict) -> dict:
             funding_gap_total += target
             status = "UNFUNDED"
 
-        bucket_meta = next(b for b in policy["buckets"] if b["bucket_id"] == bucket_id)
-        allocations.append({
-            "bucket_id": bucket_id,
-            "name_ar": bucket_meta["name_ar"],
-            "priority": bucket_meta["priority"],
+        allocation = {
+            "bucket_id": line["bucket_id"],
+            "name_ar": line["name_ar"],
+            "priority": priority,
             "target": round(target, 2),
             "allocated": round(allocated, 2),
             "status": status,
-            "mandatory": bucket_meta.get("mandatory", False),
-            "protected": bucket_meta.get("protected", False),
-        })
+            "mandatory": line.get("mandatory", True),
+            "protected": line.get("protected", False),
+        }
+        if line.get("basis_label"):
+            allocation["basis_label"] = line["basis_label"]
+        allocations.append(allocation)
 
     surplus = round(pool, 2)
     allocations.append({
         "bucket_id": "surplus_discretionary",
         "name_ar": "الفائض / الاستخدامات الاختيارية",
-        "priority": 7,
+        "priority": len(lines) + 1,
         "target": None,
         "allocated": surplus,
         "status": "AVAILABLE" if surplus > 0 else "NONE",
@@ -85,7 +103,7 @@ def run_allocation(inputs: dict, liquidity: dict, policy: dict) -> dict:
     })
 
     return {
-        "policy_id": policy["policy_id"],
+        "policy_id": policy_id,
         "net_operating_cash": round(net_operating_cash, 2),
         "allocations": allocations,
         "total_funding_gap": round(funding_gap_total, 2),
@@ -105,6 +123,8 @@ def build_explainability(allocations: list, funding_gap_total: float, surplus: f
     for a in allocations:
         if a["bucket_id"] == "surplus_discretionary":
             continue
+        if a.get("basis_label"):
+            a = {**a, "name_ar": f"{a['name_ar']} ({a['basis_label']})"}
         if a["status"] == "FULLY_FUNDED":
             lines.append(f"{a['name_ar']}: مُموّل بالكامل بمبلغ {a['allocated']:,.2f} (الأولوية {a['priority']}).")
         elif a["status"] == "PARTIAL":

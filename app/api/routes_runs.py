@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.auth import require_api_key
-from app.engine.allocation_engine import load_policy, run_allocation, validate_override
-from app.engine.liquidity_engine import compute_liquidity
+from app.allocation import compute_run
+from app.engine.allocation_engine import validate_override
 from app.validation import validate_period
 
 router = APIRouter(tags=["runs"])
@@ -72,15 +72,13 @@ def submit_snapshot(entity_id: str, snapshot: SnapshotIn):
         raise HTTPException(status_code=422, detail=str(e))
 
     values = snapshot.inputs.model_dump()
-    liquidity = compute_liquidity(values)
-    policy = load_policy()
-    allocation = run_allocation(values, liquidity, policy)
+    liquidity, allocation = compute_run(entity["org_id"], values)
 
     run_id = _new_run_id(entity_id)
     dataset_hash = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
     db.insert_run(
         run_id, entity_id, snapshot.period_start, snapshot.period_end, dataset_hash,
-        values, liquidity, allocation, policy["policy_id"],
+        values, liquidity, allocation, allocation["policy_id"],
     )
 
     return {

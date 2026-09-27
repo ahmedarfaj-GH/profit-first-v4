@@ -197,3 +197,7 @@ nav { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
 .status-pill.suspended { background: rgba(229,72,77,0.15); color: #f08b8f; }
 .card { overflow-x: auto; }  /* wide tables scroll inside their card on phones instead of the page */
 .inline-form { flex-wrap: wrap; }
+.small { font-size: 12px; }
+table.plan-editor input, table.plan-editor select { width: 100%; }
+table.plan-editor input.narrow { width: 70px; }
+button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }

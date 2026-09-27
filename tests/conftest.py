@@ -25,7 +25,7 @@ def db(database_url, monkeypatch):
     db_module.get_engine.cache_clear()
     db_module.init_db()
     with db_module.get_db() as conn:
-        for table in ("reviews", "runs", "entities", "users", "organizations"):
+        for table in ("plan_events", "distribution_plans", "reviews", "runs", "entities", "users", "organizations"):
             conn.execute(text(f"DELETE FROM {table}"))
     yield db_module
     db_module.get_engine().dispose()

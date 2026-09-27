@@ -107,6 +107,36 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_runs_entity_created ON runs (entity_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_users_org ON users (org_id)",
+    """CREATE TABLE IF NOT EXISTS distribution_plans (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        version INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        lines_json TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        submitted_by TEXT,
+        submitted_at TEXT,
+        approved_by TEXT,
+        approved_at TEXT,
+        UNIQUE (org_id, version)
+    )""",
+    # At most one approved (active) version, and at most one version being worked
+    # on (draft or awaiting approval), per organization.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_plans_active ON distribution_plans (org_id) WHERE status = 'active'",
+    """CREATE UNIQUE INDEX IF NOT EXISTS uq_plans_open ON distribution_plans (org_id)
+       WHERE status IN ('draft', 'pending')""",
+    """CREATE TABLE IF NOT EXISTS plan_events (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES distribution_plans(id),
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_plan_events_plan ON plan_events (plan_id, created_at)",
 ]
 
 LEGACY_ORG_ID = "ORG-LEGACY"
@@ -287,6 +317,15 @@ def list_all_runs(*, org_id: str | None) -> list[dict]:
     with get_db() as conn:
         rows = _all(conn.execute(text(_RUNS_WITH_ORG + clause + " ORDER BY r.created_at DESC, r.run_id DESC"), params))
     return [_run_to_dict(r) for r in rows]
+
+
+def get_latest_org_run(*, org_id: str) -> dict | None:
+    with get_db() as conn:
+        row = _one(conn.execute(
+            text(_RUNS_WITH_ORG + " AND e.org_id=:org_id ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1"),
+            {"org_id": org_id},
+        ))
+    return _run_to_dict(row) if row else None
 
 
 def list_runs_for_entity(entity_id: str, *, org_id: str | None) -> list[dict]:
@@ -512,3 +551,158 @@ def set_user_active(user_id: str, active: bool) -> None:
             text("UPDATE users SET is_active=:a, session_version = session_version + 1 WHERE id=:id"),
             {"a": int(active), "id": user_id},
         )
+
+
+# --- distribution plans ---------------------------------------------------------
+# Lifecycle: draft -> pending (submitted) -> active (approved by an owner who
+# neither submitted nor edited it); approving supersedes the previous active version, and a
+# rejection sends a pending version back to draft. Every step is logged in
+# plan_events.
+PLAN_STATUSES = ("draft", "pending", "active", "superseded")
+
+
+class PlanTransitionRejected(Exception):
+    """Raised inside a transaction to roll it back when a transition doesn't apply."""
+
+
+def _plan(row: dict | None) -> dict | None:
+    if row is None:
+        return None
+    plan = {k: v for k, v in row.items() if k != "lines_json"}
+    plan["lines"] = json.loads(row["lines_json"])
+    return plan
+
+
+def _add_plan_event(conn, plan_id: str, action: str, actor: str, note: str | None = None) -> None:
+    conn.execute(
+        text("""INSERT INTO plan_events (id, plan_id, action, actor, note, created_at)
+                VALUES (:id, :plan_id, :action, :actor, :note, :t)"""),
+        {"id": uuid.uuid4().hex, "plan_id": plan_id, "action": action, "actor": actor, "note": note, "t": now_iso()},
+    )
+
+
+def get_plan(plan_id: str, *, org_id: str) -> dict | None:
+    with get_db() as conn:
+        return _plan(_one(conn.execute(
+            text("SELECT * FROM distribution_plans WHERE id=:id AND org_id=:o"), {"id": plan_id, "o": org_id})))
+
+
+def get_active_plan(org_id: str) -> dict | None:
+    with get_db() as conn:
+        return _plan(_one(conn.execute(
+            text("SELECT * FROM distribution_plans WHERE org_id=:o AND status='active'"), {"o": org_id})))
+
+
+def get_open_plan(org_id: str) -> dict | None:
+    with get_db() as conn:
+        return _plan(_one(conn.execute(
+            text("SELECT * FROM distribution_plans WHERE org_id=:o AND status IN ('draft', 'pending')"),
+            {"o": org_id})))
+
+
+def list_plans(org_id: str) -> list[dict]:
+    with get_db() as conn:
+        rows = _all(conn.execute(
+            text("SELECT * FROM distribution_plans WHERE org_id=:o ORDER BY version DESC"), {"o": org_id}))
+    return [_plan(r) for r in rows]
+
+
+def list_plan_events(plan_id: str) -> list[dict]:
+    with get_db() as conn:
+        return _all(conn.execute(
+            text("SELECT * FROM plan_events WHERE plan_id=:p ORDER BY created_at, id"), {"p": plan_id}))
+
+
+def create_draft_plan(org_id: str, lines: list, actor: str) -> str | None:
+    """Starts the next version as a draft. Returns None when the organization
+    already has a draft or a version awaiting approval."""
+    plan_id = uuid.uuid4().hex
+    try:
+        with get_db() as conn:
+            version = conn.execute(
+                text("SELECT COALESCE(MAX(version), 0) + 1 FROM distribution_plans WHERE org_id=:o"), {"o": org_id}
+            ).scalar_one()
+            t = now_iso()
+            conn.execute(
+                text("""INSERT INTO distribution_plans (id, org_id, version, status, lines_json,
+                                                        created_by, created_at, updated_by, updated_at)
+                        VALUES (:id, :o, :v, 'draft', :lines, :actor, :t, :actor, :t)"""),
+                {"id": plan_id, "o": org_id, "v": version, "lines": json.dumps(lines, ensure_ascii=False),
+                 "actor": actor, "t": t},
+            )
+            _add_plan_event(conn, plan_id, "created", actor)
+    except IntegrityError:
+        return None
+    return plan_id
+
+
+def update_draft_lines(plan_id: str, org_id: str, lines: list, actor: str) -> bool:
+    with get_db() as conn:
+        result = conn.execute(
+            text("""UPDATE distribution_plans SET lines_json=:lines, updated_by=:actor, updated_at=:t
+                    WHERE id=:id AND org_id=:o AND status='draft'"""),
+            {"lines": json.dumps(lines, ensure_ascii=False), "actor": actor, "t": now_iso(), "id": plan_id, "o": org_id},
+        )
+        if result.rowcount != 1:
+            return False
+        _add_plan_event(conn, plan_id, "edited", actor)
+    return True
+
+
+def submit_plan(plan_id: str, org_id: str, actor: str) -> bool:
+    with get_db() as conn:
+        result = conn.execute(
+            text("""UPDATE distribution_plans SET status='pending', submitted_by=:actor, submitted_at=:t
+                    WHERE id=:id AND org_id=:o AND status='draft'"""),
+            {"actor": actor, "t": now_iso(), "id": plan_id, "o": org_id},
+        )
+        if result.rowcount != 1:
+            return False
+        _add_plan_event(conn, plan_id, "submitted", actor)
+    return True
+
+
+def approve_plan(plan_id: str, org_id: str, actor: str) -> bool:
+    """Activates a pending version and supersedes the current one, atomically.
+    The approver must be neither its submitter nor anyone who edited it."""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                text("UPDATE distribution_plans SET status='superseded' WHERE org_id=:o AND status='active'"),
+                {"o": org_id},
+            )
+            result = conn.execute(
+                text("""UPDATE distribution_plans SET status='active', approved_by=:actor, approved_at=:t
+                        WHERE id=:id AND org_id=:o AND status='pending' AND submitted_by <> :actor
+                          AND NOT EXISTS (SELECT 1 FROM plan_events
+                                          WHERE plan_id=:id AND action='edited' AND actor=:actor)"""),
+                {"actor": actor, "t": now_iso(), "id": plan_id, "o": org_id},
+            )
+            if result.rowcount != 1:
+                raise PlanTransitionRejected()
+            _add_plan_event(conn, plan_id, "approved", actor)
+    except PlanTransitionRejected:
+        return False
+    return True
+
+
+def reject_plan(plan_id: str, org_id: str, actor: str, note: str) -> bool:
+    with get_db() as conn:
+        result = conn.execute(
+            text("""UPDATE distribution_plans SET status='draft', submitted_by=NULL, submitted_at=NULL
+                    WHERE id=:id AND org_id=:o AND status='pending'"""),
+            {"id": plan_id, "o": org_id},
+        )
+        if result.rowcount != 1:
+            return False
+        _add_plan_event(conn, plan_id, "rejected", actor, note)
+    return True
+
+
+def plan_designers(plan_id: str) -> set[str]:
+    """Everyone who edited or submitted a version — none of them may approve it."""
+    with get_db() as conn:
+        rows = _all(conn.execute(
+            text("SELECT DISTINCT actor FROM plan_events WHERE plan_id=:p AND action IN ('edited', 'submitted')"),
+            {"p": plan_id}))
+    return {r["actor"] for r in rows}
