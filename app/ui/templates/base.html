@@ -12,9 +12,18 @@
   <header class="topbar">
     <div class="brand">Profit First <span class="badge">Prototype</span></div>
     <nav>
-      <a href="/hierarchy">الهرمية</a>
-      <a href="/runs">كل العمليات</a>
-      <a href="/logout">تسجيل الخروج ({{ user }})</a>
+      {% if not user.must_change_password %}
+        {% if perms.platform_admin %}
+        <a href="/admin">المنشآت</a>
+        {% else %}
+        <a href="/hierarchy">الهرمية</a>
+        <a href="/runs">كل العمليات</a>
+        {% if perms.manage_team %}<a href="/team">الفريق</a>{% endif %}
+        {% endif %}
+      {% endif %}
+      <a href="/account/password">كلمة المرور</a>
+      <a href="/logout">تسجيل الخروج</a>
+      <span class="who">{{ user.username }} · {{ role_labels.get(user.role, user.role) }}{% if user.org_name %} · {{ user.org_name }}{% endif %}</span>
     </nav>
   </header>
   {% endif %}

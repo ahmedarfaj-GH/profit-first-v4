@@ -7,7 +7,7 @@
 <div class="filter-bar">
   <form method="get" action="/runs" style="display:flex; gap:10px; align-items:center;">
     <label style="margin:0;">تصفية حسب الكيان
-      <select name="entity_id" onchange="this.form.submit()">
+      <select name="entity_id" data-autosubmit>
         <option value="">— كل الكيانات ({{ entities|length }}) —</option>
         {% for eid, e in entities.items() %}
         <option value="{{ eid }}" {% if eid == selected_entity_id %}selected{% endif %}>{{ e.name }} ({{ eid }})</option>

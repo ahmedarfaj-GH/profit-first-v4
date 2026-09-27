@@ -5,7 +5,7 @@ import openpyxl
 import pytest
 
 from app.config import validate_config
-from tests.conftest import TEST_LOGIN_PASSWORD
+from tests.conftest import TEST_LOGIN_PASSWORD, login
 
 MANUAL_RUN = {
     "period_start": "2026-07-01", "period_end": "2026-08-31",
@@ -41,10 +41,11 @@ def test_login_rejects_wrong_password_and_non_ascii_username(client):
 
 
 def test_login_succeeds_and_sets_hardened_cookie(client):
-    response = client.post("/login", data={"username": "manager", "password": TEST_LOGIN_PASSWORD},
+    response = client.post("/login", data={"username": "Manager ", "password": TEST_LOGIN_PASSWORD},
                            follow_redirects=False)
     cookie = response.headers["set-cookie"].lower()
     assert response.status_code == 303 and "httponly" in cookie and "samesite=lax" in cookie
+    assert response.headers["location"] == "/admin"  # the bootstrapped platform admin
 
 
 def test_repeated_failures_lock_the_login(client):
@@ -77,10 +78,16 @@ def test_security_headers_are_present(client):
 
 def test_pages_ship_no_inline_scripts(logged_in):
     create_entity(logged_in)
-    for path in ("/hierarchy", "/login", "/entities/SHOP-1/new-run"):
-        html = logged_in.get(path).text
-        assert not re.search(r"<script(?![^>]*\bsrc=)", html), path
-        assert not re.search(r"\son\w+\s*=", html), path
+    run_id = submit_run(logged_in)
+    pages = ["/hierarchy", "/runs", f"/runs/{run_id}", "/entities/SHOP-1/new-run", "/team", "/account/password"]
+    for path in pages:
+        response = logged_in.get(path)
+        assert response.status_code == 200, path
+        assert not re.search(r"<script(?![^>]*\bsrc=)", response.text), path
+        assert not re.search(r"\son\w+\s*=", response.text), path
+    login(logged_in, "manager")
+    html = logged_in.get("/admin").text
+    assert not re.search(r"<script(?![^>]*\bsrc=)", html) and not re.search(r"\son\w+\s*=", html)
 
 
 def test_production_config_fails_fast_when_weak(monkeypatch):
@@ -112,16 +119,15 @@ def test_manual_run_and_review_flow(logged_in):
     page = logged_in.get(f"/runs/{run_id}").text
     assert "-5854.83" in page and "FUNDING_GAP" in page
 
-    assert logged_in.post(f"/runs/{run_id}/review", data={"decision": "MAYBE", "decided_by": "Sara"}).status_code == 400
+    assert logged_in.post(f"/runs/{run_id}/review", data={"decision": "MAYBE"}).status_code == 400
     protected = logged_in.post(f"/runs/{run_id}/review", data={
-        "decision": "MODIFY", "decided_by": "Sara", "override_bucket": "payroll", "override_value": "100"})
+        "decision": "MODIFY", "override_bucket": "payroll", "override_value": "100"})
     assert protected.status_code == 400
-    approved = logged_in.post(f"/runs/{run_id}/review", data={"decision": "APPROVE", "decided_by": "Sara"},
-                              follow_redirects=False)
+    approved = logged_in.post(f"/runs/{run_id}/review", data={"decision": "APPROVE"}, follow_redirects=False)
     assert approved.status_code == 303
-    again = logged_in.post(f"/runs/{run_id}/review", data={"decision": "REJECT", "decided_by": "Omar"})
+    again = logged_in.post(f"/runs/{run_id}/review", data={"decision": "REJECT"})
     assert again.status_code == 409
-    assert "Sara (manager)" in logged_in.get(f"/runs/{run_id}").text
+    assert "owner1" in logged_in.get(f"/runs/{run_id}").text  # recorded under the reviewer's own account
 
 
 @pytest.mark.parametrize("field,value", [("total_collections", "-1"), ("vat_due", "nan"), ("payroll_due", "inf"),
@@ -167,11 +173,16 @@ def test_key_comparison_survives_non_ascii_input():
     assert _safe_equal("مفتاح", "key") is False
 
 
-def test_api_full_flow_and_validation(client):
+def test_api_full_flow_and_validation(client, db, org):
     post = lambda path, body: client.post(f"/api/v1{path}", json=body, headers=API_HEADERS)  # noqa: E731
-    assert post("/entities", {"id": "bad/id", "name": "x"}).status_code == 422
-    assert post("/entities", {"id": "API-1", "name": "Api shop"}).status_code == 200
-    assert post("/entities", {"id": "API-1", "name": "Api shop", "parent_id": "API-1"}).status_code == 400
+    assert post("/entities", {"org_id": org, "id": "bad/id", "name": "x"}).status_code == 422
+    assert post("/entities", {"id": "API-1", "name": "Api shop"}).status_code == 422  # org_id is required
+    assert post("/entities", {"org_id": "ORG-NOPE", "id": "API-1", "name": "Api shop"}).status_code == 400
+    assert post("/entities", {"org_id": org, "id": "API-1", "name": "Api shop"}).status_code == 200
+    assert post("/entities", {"org_id": org, "id": "API-1", "name": "Api shop", "parent_id": "API-1"}).status_code == 400
+    other = db.create_organization("Other Co")
+    assert post("/entities", {"org_id": other, "id": "API-1", "name": "Hijack"}).status_code == 409
+    assert db.get_entity("API-1", org_id=None)["name"] == "Api shop"
 
     body = {"period_start": "2026-07-01", "period_end": "2026-07-31", "inputs": {"opening_cash_balance": 1000}}
     # httpx refuses to serialise Infinity, so send it as raw JSON text.

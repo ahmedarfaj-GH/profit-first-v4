@@ -70,8 +70,10 @@
     {% if review.justification %}<tr><td>التبرير</td><td>{{ review.justification }}</td></tr>{% endif %}
     <tr><td>التوقيت</td><td>{{ review.decided_at }}</td></tr>
   </table>
+  {% elif not perms.review %}
+  <p class="muted">لم تتم المراجعة بعد. المراجعة من صلاحية المالك أو مدير الخزينة.</p>
   {% else %}
-  <p class="muted">لم تتم المراجعة بعد. أي بند محمي 🔒 لا يمكن تعديله بدون تبرير غير فارغ.</p>
+  <p class="muted">لم تتم المراجعة بعد. أي بند محمي 🔒 لا يمكن تعديله بدون تبرير غير فارغ. سيُسجَّل القرار باسم حسابك ({{ user.username }}).</p>
   <form method="post" action="/runs/{{ run.run_id }}/review" class="grid-form">
     <label>القرار
       <select name="decision" required>
@@ -79,9 +81,6 @@
         <option value="MODIFY">Modify</option>
         <option value="REJECT">Reject</option>
       </select>
-    </label>
-    <label>اسم المُراجِع
-      <input type="text" name="decided_by" required>
     </label>
     <label>بند التعديل (اختياري)
       <select name="override_bucket">

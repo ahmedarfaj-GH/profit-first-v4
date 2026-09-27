@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}الفريق — Profit First{% endblock %}
+{% block content %}
+<h1>فريق {{ user.org_name }}</h1>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert notice">{{ notice }}</div>{% endif %}
+
+<section class="card">
+  <h2>إضافة مستخدم</h2>
+  <form method="post" action="/team/users" class="grid-form">
+    <label>اسم المستخدم (أو البريد الإلكتروني)
+      <input type="text" name="username" required maxlength="64" autocomplete="off">
+    </label>
+    <label>الدور
+      <select name="role" required>
+        <option value="" disabled selected>— اختر الدور —</option>
+        {% for role in org_roles %}
+        <option value="{{ role }}">{{ role_labels[role] }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>كلمة مرور مؤقتة (12 خانة على الأقل — سيغيّرها عند أول دخول)
+      <input type="password" name="password" required minlength="12" autocomplete="new-password">
+    </label>
+    <button type="submit">إضافة</button>
+  </form>
+  <ul class="muted">
+    <li><strong>المالك:</strong> كل الصلاحيات، وإدارة الفريق.</li>
+    <li><strong>المحاسب:</strong> إدارة الكيانات وإدخال بيانات الفترات.</li>
+    <li><strong>مدير الخزينة:</strong> مراجعة النتائج واعتماد القرارات.</li>
+    <li><strong>مشاهد:</strong> اطلاع فقط.</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2>أعضاء الفريق</h2>
+  <table>
+    <thead>
+      <tr><th>اسم المستخدم</th><th>الدور</th><th>الحالة</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for m in members %}
+      <tr>
+        <td>{{ m.username }}</td>
+        <td>{{ role_labels.get(m.role, m.role) }}</td>
+        <td>
+          {% if not m.is_active %}<span class="status-pill suspended">معطّل</span>
+          {% elif m.must_change_password %}<span class="status-pill pending">بانتظار أول دخول</span>
+          {% else %}<span class="status-pill reviewed">نشط</span>{% endif %}
+        </td>
+        <td class="actions">
+          {% if m.id != user.id %}
+          <form method="post" action="/team/users/{{ m.id }}/active" class="inline-form">
+            <input type="hidden" name="active" value="{{ '0' if m.is_active else '1' }}">
+            <button type="submit">{{ "تعطيل" if m.is_active else "تفعيل" }}</button>
+          </form>
+          <form method="post" action="/team/users/{{ m.id }}/password" class="inline-form">
+            <input type="password" name="password" required minlength="12" placeholder="كلمة مرور مؤقتة جديدة" autocomplete="new-password">
+            <button type="submit">إعادة تعيين</button>
+          </form>
+          {% else %}
+          <span class="muted">حسابك</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
