@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.auth import hash_password  # noqa: E402
 
-MIN_LENGTH = 12
+MIN_LENGTH = 8
 
 def ask(prompt: str) -> str:
     # getpass hides typing but needs a real console; fall back when input is piped.

@@ -29,8 +29,9 @@ from app import db
 SESSION_COOKIE_NAME = "pf_session"
 SESSION_MAX_AGE_SECONDS = 8 * 3600
 MAX_PASSWORD_LENGTH = 256
-MIN_PASSWORD_LENGTH = 12
-USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._@-]{2,63}$")
+MIN_PASSWORD_LENGTH = 8
+# Arabic or English letters, digits, and . _ @ + - (so an email address works); no spaces.
+USERNAME_PATTERN = re.compile(r"^[\w.@+-]{3,64}$")
 BCRYPT_MAX_BYTES = 72  # bcrypt ignores anything beyond this; bcrypt>=5 raises instead
 
 
@@ -63,7 +64,7 @@ def is_valid_username(username: str) -> bool:
 
 def password_problem(password: str) -> str | None:
     if len(password) < MIN_PASSWORD_LENGTH:
-        return f"كلمة المرور يجب أن تكون {MIN_PASSWORD_LENGTH} خانة على الأقل"
+        return f"كلمة المرور يجب أن تكون {MIN_PASSWORD_LENGTH} خانات على الأقل"
     if len(password) > MAX_PASSWORD_LENGTH:
         return "كلمة المرور طويلة جدًا"
     return None

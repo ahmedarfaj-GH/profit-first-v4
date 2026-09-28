@@ -20,8 +20,8 @@
         {% endfor %}
       </select>
     </label>
-    <label>كلمة مرور مؤقتة (12 خانة على الأقل — سيغيّرها عند أول دخول)
-      <input type="password" name="password" required minlength="12" autocomplete="new-password">
+    <label>كلمة مرور مؤقتة ({{ min_password }} خانات على الأقل — سيغيّرها عند أول دخول)
+      <input type="password" name="password" required minlength="{{ min_password }}" autocomplete="new-password">
     </label>
     <button type="submit">إضافة</button>
   </form>
@@ -56,7 +56,7 @@
             <button type="submit">{{ "تعطيل" if m.is_active else "تفعيل" }}</button>
           </form>
           <form method="post" action="/team/users/{{ m.id }}/password" class="inline-form">
-            <input type="password" name="password" required minlength="12" placeholder="كلمة مرور مؤقتة جديدة" autocomplete="new-password">
+            <input type="password" name="password" required minlength="{{ min_password }}" placeholder="كلمة مرور مؤقتة جديدة" autocomplete="new-password">
             <button type="submit">إعادة تعيين</button>
           </form>
           {% else %}

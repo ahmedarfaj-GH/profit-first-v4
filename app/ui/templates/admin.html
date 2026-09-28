@@ -15,8 +15,8 @@
     <label>اسم مستخدم المالك (أو بريده الإلكتروني)
       <input type="text" name="owner_username" required maxlength="64" autocomplete="off">
     </label>
-    <label>كلمة مرور مؤقتة للمالك (12 خانة على الأقل — سيغيّرها عند أول دخول)
-      <input type="password" name="owner_password" required minlength="12" autocomplete="new-password">
+    <label>كلمة مرور مؤقتة للمالك ({{ min_password }} خانات على الأقل — سيغيّرها عند أول دخول)
+      <input type="password" name="owner_password" required minlength="{{ min_password }}" autocomplete="new-password">
     </label>
     <button type="submit">إنشاء</button>
   </form>
@@ -49,7 +49,7 @@
           </form>
           <form method="post" action="/admin/organizations/{{ o.id }}/owners" class="inline-form">
             <input type="text" name="username" required maxlength="64" placeholder="مالك إضافي" autocomplete="off">
-            <input type="password" name="password" required minlength="12" placeholder="كلمة مرور مؤقتة" autocomplete="new-password">
+            <input type="password" name="password" required minlength="{{ min_password }}" placeholder="كلمة مرور مؤقتة" autocomplete="new-password">
             <button type="submit">إضافة مالك</button>
           </form>
         </td>

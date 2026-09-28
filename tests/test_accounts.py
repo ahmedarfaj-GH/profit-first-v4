@@ -211,3 +211,19 @@ def test_sessions_from_before_accounts_are_rejected(client):
 
     client.cookies.set("pf_session", _serializer().dumps({"u": "manager"}))  # the old token shape
     assert client.get("/admin", follow_redirects=False).headers["location"] == "/login"
+
+
+@pytest.mark.parametrize("username", ["أحمد", "Ahmed.Arfaj", "owner+cafe@example.sa", "مدير_الفرع"])
+def test_arabic_names_and_emails_are_valid_usernames(logged_in, db, username):
+    response = post(logged_in, "/team/users", {"username": username, "role": "viewer", "password": "eight8ch"})
+    assert response.status_code == 200, response.text
+    login(logged_in, username.upper(), "eight8ch")  # sign-in ignores letter case
+
+
+@pytest.mark.parametrize("username,password", [
+    ("أحمد العرفج", TEST_LOGIN_PASSWORD),  # spaces
+    ("ab", TEST_LOGIN_PASSWORD),           # too short
+    ("sara", "seven77"),                   # 7 characters
+])
+def test_username_and_password_rules(logged_in, db, username, password):
+    assert post(logged_in, "/team/users", {"username": username, "role": "viewer", "password": password}).status_code == 400
