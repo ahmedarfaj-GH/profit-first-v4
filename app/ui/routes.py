@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from app import db
 from app.auth import (
-    SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, check_login, create_session_token, hash_password,
+    MIN_PASSWORD_LENGTH, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, check_login, create_session_token, hash_password,
     is_valid_username, login_throttle, normalize_username, password_problem, user_from_session_token,
     verify_password,
 )
@@ -129,7 +129,8 @@ def _perms(user: Optional[dict]) -> dict:
 def render(request: Request, name: str, user: Optional[dict], status_code: int = 200, **context):
     return templates.TemplateResponse(
         name,
-        {"request": request, "user": user, "perms": _perms(user), "role_labels": ROLE_LABELS_AR, **context},
+        {"request": request, "user": user, "perms": _perms(user), "role_labels": ROLE_LABELS_AR,
+         "min_password": MIN_PASSWORD_LENGTH, **context},
         status_code=status_code,
     )
 
@@ -471,7 +472,7 @@ def _team_page(request: Request, user: dict, error: Optional[str] = None, notice
 
 def _new_account_problem(username: str, password: str) -> Optional[str]:
     if not is_valid_username(username):
-        return "اسم المستخدم: 3 إلى 64 خانة من حروف إنجليزية صغيرة وأرقام و . _ @ - (يصلح البريد الإلكتروني)"
+        return "اسم المستخدم: من 3 إلى 64 خانة بدون مسافات — حروف عربية أو إنجليزية أو أرقام، أو بريد إلكتروني"
     problem = password_problem(password)
     if problem:
         return problem
