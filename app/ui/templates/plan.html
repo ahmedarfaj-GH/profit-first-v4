@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}جدول التوزيعات — الإصدار {{ plan.version }}{% endblock %}
+{% block content %}
+<p><a href="/plans">← جدول التوزيعات</a></p>
+<h1>الإصدار {{ plan.version }} — {{ status_labels[plan.status] }}</h1>
+<p class="muted">
+  أنشأه {{ plan.created_by }} · آخر تعديل {{ plan.updated_by }}
+  {% if plan.submitted_by %} · أرسله للاعتماد {{ plan.submitted_by }}{% endif %}
+  {% if plan.approved_by %} · اعتمده {{ plan.approved_by }}{% endif %}
+</p>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if last_rejection %}
+<div class="alert error">أعاده {{ last_rejection.actor }} للتعديل: {{ last_rejection.note }}</div>
+{% endif %}
+
+{% set editable = plan.status == "draft" and perms.design_plan %}
+<section class="card">
+  <h2>البنود بالأولوية</h2>
+  {% if editable %}
+  <p class="muted">
+    رتّب البنود برقم الأولوية (الأصغر يُموَّل أولًا). لإضافة بند اكتب اسمه في صف فارغ؛ لحذفه امسح اسمه.
+    <strong>النسبة</strong> تُحسب من إجمالي تحصيلات الفترة، و<strong>المبلغ الثابت</strong> يتكرر كل فترة،
+    و<strong>بيانات الفترة</strong> تأخذ المبلغ المُدخل مع كل فترة. ما يتبقى يذهب للفائض تلقائيًا.
+  </p>
+  <form method="post" action="/plans/{{ plan.id }}/lines">
+    <table class="plan-editor">
+      <thead><tr><th>الأولوية</th><th>اسم البند</th><th>طريقة التحديد</th><th>النسبة % / المبلغ</th><th>محمي 🔒</th></tr></thead>
+      <tbody>
+        {% for line in lines %}
+        {% set key = "input:" ~ line.input_field if line.basis == "input" else line.basis %}
+        <tr>
+          <td><input type="number" name="line_order" value="{{ loop.index }}" step="any" class="narrow"></td>
+          <td><input type="text" name="line_name" value="{{ line.name }}" maxlength="100"></td>
+          <td>
+            <select name="line_basis">
+              {% for value, label in basis_options %}
+              <option value="{{ value }}" {% if value == key %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </td>
+          <td><input type="number" name="line_value" step="any" min="0" value="{% if line.value is number %}{{ ('%.4f'|format(line.value)).rstrip('0').rstrip('.') }}{% elif line.value is not none %}{{ line.value }}{% endif %}"></td>
+          <td>
+            <select name="line_protected">
+              <option value="0" {% if not line.protected %}selected{% endif %}>لا</option>
+              <option value="1" {% if line.protected %}selected{% endif %}>نعم</option>
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+        {% for i in range(blank_rows) %}
+        <tr class="blank-row">
+          <td><input type="number" name="line_order" value="{{ lines|length + loop.index }}" step="any" class="narrow"></td>
+          <td><input type="text" name="line_name" value="" maxlength="100" placeholder="بند جديد (اختياري)"></td>
+          <td>
+            <select name="line_basis">
+              {% for value, label in basis_options %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+            </select>
+          </td>
+          <td><input type="number" name="line_value" step="any" min="0" value=""></td>
+          <td>
+            <select name="line_protected"><option value="0">لا</option><option value="1">نعم</option></select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <button type="submit">حفظ المسودة</button>
+  </form>
+  {% else %}
+  <table>
+    <thead><tr><th>الأولوية</th><th>البند</th><th>طريقة التحديد</th><th>محمي</th></tr></thead>
+    <tbody>
+      {% for line in lines %}
+      <tr><td>{{ loop.index }}</td><td>{{ line.name }}</td><td>{{ basis_label(line) }}</td><td>{% if line.protected %}🔒{% endif %}</td></tr>
+      {% endfor %}
+      <tr><td>{{ lines|length + 1 }}</td><td>الفائض / الاستخدامات الاختيارية</td><td class="muted">ما يتبقى بعد كل البنود</td><td></td></tr>
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% if plan.status == "draft" and perms.design_plan %}
+<section class="card">
+  <h2>الإرسال للاعتماد</h2>
+  <p class="muted">بعد الإرسال لا يمكن التعديل إلا إذا أُعيد. يعتمده مالكٌ لم يشارك في تعديله، ثم يسري على الحسابات الجديدة.</p>
+  <form method="post" action="/plans/{{ plan.id }}/submit"><button type="submit">إرسال للاعتماد</button></form>
+</section>
+{% endif %}
+
+{% if plan.status == "pending" %}
+<section class="card">
+  <h2>الاعتماد</h2>
+  {% if not perms.approve_plan %}
+  <p class="muted">بانتظار اعتماد المالك.</p>
+  {% elif user.username in designers %}
+  <p class="muted">شاركت في تعديل هذا الإصدار أو أرسلته، فيلزم أن يعتمده مالكٌ آخر (مصادقة من شخصين). أضف مالكًا ثانيًا من صفحة الفريق إن لم يوجد، أو أعده للتعديل.</p>
+  <form method="post" action="/plans/{{ plan.id }}/reject" class="grid-form">
+    <label>إعادة للتعديل مع السبب
+      <textarea name="note" rows="2" maxlength="1000" required></textarea>
+    </label>
+    <button type="submit" class="secondary">إعادة للتعديل</button>
+  </form>
+  {% else %}
+  <p class="muted">راجع البنود والمعاينة أدناه. الاعتماد يجعل هذا الإصدار ساريًا فورًا ويحلّ محل الإصدار الحالي.</p>
+  <form method="post" action="/plans/{{ plan.id }}/approve"><button type="submit">اعتماد</button></form>
+  <form method="post" action="/plans/{{ plan.id }}/reject" class="grid-form">
+    <label>أو أعده للتعديل مع السبب
+      <textarea name="note" rows="2" maxlength="1000" required></textarea>
+    </label>
+    <button type="submit" class="secondary">إعادة للتعديل</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if preview %}
+<section class="card">
+  <h2>معاينة على آخر بيانات فترة</h2>
+  <p class="muted">
+    كيف كان هذا الإصدار سيوزّع بيانات <a href="/runs/{{ preview.run.run_id }}">آخر عملية حساب</a>
+    ({{ preview.run.period_start }} → {{ preview.run.period_end }}) — معاينة فقط، لا تغيّر أي نتيجة محفوظة.
+    {% if editable %}تعكس المعاينة آخر ما حُفظ من المسودة.{% endif %}
+  </p>
+  <div class="status-banner status-{{ preview.allocation.overall_status|lower }}">
+    {{ preview.allocation.overall_status }}
+    {% if preview.allocation.total_funding_gap > 0 %}— عجز تمويلي: {{ "%.2f"|format(preview.allocation.total_funding_gap) }}{% endif %}
+    {% if preview.allocation.surplus_discretionary > 0 %}— فائض: {{ "%.2f"|format(preview.allocation.surplus_discretionary) }}{% endif %}
+  </div>
+  <table>
+    <thead><tr><th>البند</th><th>المستهدف</th><th>المخصّص</th><th>الحالة</th></tr></thead>
+    <tbody>
+      {% for a in preview.allocation.allocations %}
+      <tr>
+        <td>{{ a.priority }}. {{ a.name_ar }}</td>
+        <td dir="ltr">{{ "%.2f"|format(a.target) if a.target is not none else "—" }}</td>
+        <td dir="ltr">{{ "%.2f"|format(a.allocated) }}</td>
+        <td>{{ a.status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>سجل هذا الإصدار</h2>
+  <ul class="explain">
+    {% for e in events %}
+    <li>{{ e.created_at[:16]|replace("T", " ") }} — {{ event_labels.get(e.action, e.action) }} ({{ e.actor }}){% if e.note %}: {{ e.note }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

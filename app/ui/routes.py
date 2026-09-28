@@ -12,11 +12,17 @@ from fastapi.templating import Jinja2Templates
 
 from app import db
 from app.auth import (
-    SESSION_COOKIE_NAME, check_login, create_session_token, login_throttle, verify_session_token,
+    SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, check_login, create_session_token, hash_password,
+    is_valid_username, login_throttle, normalize_username, password_problem, user_from_session_token,
+    verify_password,
 )
 from app.config import is_production
-from app.engine.allocation_engine import load_policy, run_allocation, validate_override
-from app.engine.liquidity_engine import compute_liquidity
+from app.allocation import compute_run, plan_policy_id
+from app.engine.allocation_engine import validate_override
+from app.engine.distribution_plan import (
+    BASIS_FIXED, BASIS_INPUT, BASIS_PERCENT, INPUT_FIELD_LABELS_AR, MAX_LINES, basis_label, default_lines,
+    normalize_lines, run_plan_allocation,
+)
 from app.engine.xlsx_template import TemplateParseError, build_template_workbook, parse_intake_workbook
 from app.validation import is_finite_non_negative, is_valid_entity_id, validate_period
 
@@ -55,8 +61,100 @@ ENTITY_TYPE_LABELS_AR = {
 }
 
 
-def current_user(request: Request) -> Optional[str]:
-    return verify_session_token(request.cookies.get(SESSION_COOKIE_NAME))
+ROLE_LABELS_AR = {
+    db.PLATFORM_ADMIN_ROLE: "أدمن المنصة",
+    "owner": "المالك",
+    "accountant": "المحاسب",
+    "treasurer": "مدير الخزينة",
+    "viewer": "مشاهد",
+}
+CAN_EDIT_DATA = {"owner", "accountant"}   # entities and period data
+CAN_REVIEW = {"owner", "treasurer"}       # the person who enters data doesn't approve it
+CAN_MANAGE_TEAM = {"owner"}
+CAN_DESIGN_PLAN = {"owner", "accountant"}
+CAN_APPROVE_PLAN = {"owner"}              # and never someone who edited or submitted the version
+
+
+def _redirect(location: str) -> HTTPException:
+    return HTTPException(status_code=303, headers={"Location": location})
+
+
+def current_user(request: Request) -> Optional[dict]:
+    return user_from_session_token(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+def _home(user: dict) -> str:
+    return "/admin" if user["role"] == db.PLATFORM_ADMIN_ROLE else "/hierarchy"
+
+
+def require_user(request: Request, *, pending_password_ok: bool = False) -> dict:
+    user = current_user(request)
+    if not user:
+        raise _redirect("/login")
+    if user["must_change_password"] and not pending_password_ok:
+        raise _redirect("/account/password")
+    return user
+
+
+def require_org_user(request: Request, roles: set[str] | None = None) -> dict:
+    """A signed-in member of an organization; every page below works inside
+    that organization only."""
+    user = require_user(request)
+    if user["role"] == db.PLATFORM_ADMIN_ROLE:
+        raise _redirect("/admin")
+    if roles is not None and user["role"] not in roles:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية لهذا الإجراء")
+    return user
+
+
+def require_platform_admin(request: Request) -> dict:
+    user = require_user(request)
+    if user["role"] != db.PLATFORM_ADMIN_ROLE:
+        raise HTTPException(status_code=403, detail="هذه الصفحة لأدمن المنصة فقط")
+    return user
+
+
+def _perms(user: Optional[dict]) -> dict:
+    role = user["role"] if user else None
+    return {
+        "edit_data": role in CAN_EDIT_DATA,
+        "review": role in CAN_REVIEW,
+        "manage_team": role in CAN_MANAGE_TEAM,
+        "design_plan": role in CAN_DESIGN_PLAN,
+        "approve_plan": role in CAN_APPROVE_PLAN,
+        "platform_admin": role == db.PLATFORM_ADMIN_ROLE,
+    }
+
+
+def render(request: Request, name: str, user: Optional[dict], status_code: int = 200, **context):
+    return templates.TemplateResponse(
+        name,
+        {"request": request, "user": user, "perms": _perms(user), "role_labels": ROLE_LABELS_AR, **context},
+        status_code=status_code,
+    )
+
+
+def _signed_in_redirect(request: Request, user: dict, location: str) -> RedirectResponse:
+    resp = RedirectResponse(location, status_code=303)
+    resp.set_cookie(
+        SESSION_COOKIE_NAME, create_session_token(user), httponly=True, samesite="lax",
+        secure=(is_production() or request.url.scheme == "https"), max_age=SESSION_MAX_AGE_SECONDS,
+    )
+    return resp
+
+
+def _get_org_entity(entity_id: str, user: dict) -> dict:
+    entity = db.get_entity(entity_id, org_id=user["org_id"])
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return entity
+
+
+def _get_org_run(run_id: str, user: dict) -> dict:
+    run = db.get_run(run_id, org_id=user["org_id"])
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 def _new_run_id(entity_id: str) -> str:
@@ -66,42 +164,34 @@ def _new_run_id(entity_id: str) -> str:
 
 @router.get("/")
 def root(request: Request):
-    return RedirectResponse("/hierarchy" if current_user(request) else "/login", status_code=303)
+    user = current_user(request)
+    return RedirectResponse(_home(user) if user else "/login", status_code=303)
 
 
 @router.get("/login")
 def login_page(request: Request):
-    if current_user(request):
-        return RedirectResponse("/hierarchy", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    user = current_user(request)
+    if user:
+        return RedirectResponse(_home(user), status_code=303)
+    return render(request, "login.html", None, error=None)
 
 
 @router.post("/login")
 def login_submit(request: Request, username: str = Form(..., max_length=200), password: str = Form(..., max_length=1000)):
     client = f"ip:{request.client.host if request.client else 'unknown'}"
-    account = f"user:{username.strip().lower()}"
+    account = f"user:{normalize_username(username)}"
 
     if login_throttle.is_blocked(client, account):
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "محاولات دخول فاشلة كثيرة — انتظر ١٥ دقيقة ثم حاول مجددًا"},
-            status_code=429,
-        )
+        return render(request, "login.html", None, status_code=429,
+                      error="محاولات دخول فاشلة كثيرة — انتظر ١٥ دقيقة ثم حاول مجددًا")
 
-    if check_login(username, password):
+    user = check_login(username, password)
+    if user:
         login_throttle.reset(client, account)
-        token = create_session_token(username.strip())
-        resp = RedirectResponse("/hierarchy", status_code=303)
-        resp.set_cookie(
-            SESSION_COOKIE_NAME, token, httponly=True, samesite="lax",
-            secure=(is_production() or request.url.scheme == "https"), max_age=8 * 3600,
-        )
-        return resp
+        return _signed_in_redirect(request, user, "/account/password" if user["must_change_password"] else _home(user))
 
     login_throttle.record_failure(client, account)
-    return templates.TemplateResponse(
-        "login.html", {"request": request, "error": "بيانات الدخول غير صحيحة"}, status_code=401
-    )
+    return render(request, "login.html", None, status_code=401, error="بيانات الدخول غير صحيحة")
 
 
 @router.get("/logout")
@@ -111,39 +201,60 @@ def logout():
     return resp
 
 
+# --- own account --------------------------------------------------------------
+@router.get("/account/password")
+def password_page(request: Request):
+    user = require_user(request, pending_password_ok=True)
+    return render(request, "password.html", user, error=None)
+
+
+@router.post("/account/password")
+def password_submit(
+    request: Request,
+    current_password: str = Form(..., max_length=1000),
+    new_password: str = Form(..., max_length=1000),
+    confirm_password: str = Form(..., max_length=1000),
+):
+    user = require_user(request, pending_password_ok=True)
+
+    def error(message: str, status_code: int = 400):
+        return render(request, "password.html", user, status_code=status_code, error=message)
+
+    if not verify_password(user, current_password):
+        return error("كلمة المرور الحالية غير صحيحة", 401)
+    problem = password_problem(new_password)
+    if problem:
+        return error(problem)
+    if new_password != confirm_password:
+        return error("كلمتا المرور الجديدتان غير متطابقتين")
+    if new_password == current_password:
+        return error("اختر كلمة مرور مختلفة عن الحالية")
+
+    db.set_password(user["id"], hash_password(new_password), must_change_password=False)
+    # Other sessions are now revoked; this one gets a fresh token.
+    return _signed_in_redirect(request, db.get_user(user["id"]), _home(user))
+
+
 @router.get("/hierarchy")
 def hierarchy_page(request: Request):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    entities = db.list_entities()
-    latest = db.latest_runs_by_entity()
-    return templates.TemplateResponse(
-        "hierarchy.html",
-        {
-            "request": request, "user": user, "entities": entities, "latest": latest,
-            "entity_type_labels": ENTITY_TYPE_LABELS_AR,
-        },
-    )
+    user = require_org_user(request)
+    entities = db.list_entities(org_id=user["org_id"])
+    latest = db.latest_runs_by_entity(org_id=user["org_id"])
+    return render(request, "hierarchy.html", user, entities=entities, latest=latest,
+                  entity_type_labels=ENTITY_TYPE_LABELS_AR)
 
 
 @router.get("/runs")
 def all_runs_page(request: Request, entity_id: str = ""):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
+    user = require_org_user(request)
+    org_id = user["org_id"]
 
-    entities = {e["id"]: e for e in db.list_entities()}
-    runs = db.list_runs_for_entity(entity_id) if entity_id else db.list_all_runs()
+    entities = db.all_entities_map(org_id=org_id)
+    runs = db.list_runs_for_entity(entity_id, org_id=org_id) if entity_id else db.list_all_runs(org_id=org_id)
     reviews = db.reviews_by_run_ids([r["run_id"] for r in runs])
 
-    return templates.TemplateResponse(
-        "runs_list.html",
-        {
-            "request": request, "user": user, "runs": runs, "entities": entities,
-            "reviews": reviews, "selected_entity_id": entity_id,
-        },
-    )
+    return render(request, "runs_list.html", user, runs=runs, entities=entities, reviews=reviews,
+                  selected_entity_id=entity_id)
 
 
 @router.post("/entities")
@@ -156,9 +267,8 @@ def create_entity_form(
     parent_id: str = Form(""),
     currency: str = Form("SAR"),
 ):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
+    user = require_org_user(request, CAN_EDIT_DATA)
+    org_id = user["org_id"]
 
     if type == "__other__":
         type = type_other.strip()
@@ -172,38 +282,28 @@ def create_entity_form(
         raise HTTPException(status_code=400, detail="الاسم مطلوب (حتى 200 خانة) والنوع حتى 50 خانة")
     if not (len(currency) == 3 and currency.isalpha()):
         raise HTTPException(status_code=400, detail="العملة رمز من 3 حروف مثل SAR")
-    if parent_id and not db.get_entity(parent_id):
+    if parent_id and not db.get_entity(parent_id, org_id=org_id):
         raise HTTPException(status_code=400, detail=f"Unknown parent_id: {parent_id}")
-    if db.would_create_cycle(id, parent_id):
+    if db.would_create_cycle(id, parent_id, org_id=org_id):
         raise HTTPException(status_code=400, detail="لا يمكن جعل الكيان تابعًا لنفسه أو لأحد فروعه")
 
-    db.upsert_entity(id, name, type, parent_id, currency)
+    if not db.upsert_entity(id, name, type, parent_id, currency, org_id=org_id):
+        raise HTTPException(status_code=400, detail="هذا المعرّف مستخدم — اختر معرّفًا آخر")
     return RedirectResponse("/hierarchy", status_code=303)
 
 
 @router.get("/entities/{entity_id}/new-run")
 def new_run_page(request: Request, entity_id: str):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    entity = db.get_entity(entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
-    return templates.TemplateResponse(
-        "intake.html",
-        {"request": request, "user": user, "entity": entity, "fields": FIELD_LABELS_AR, "error": None},
-    )
+    user = require_org_user(request, CAN_EDIT_DATA)
+    entity = _get_org_entity(entity_id, user)
+    return render(request, "intake.html", user, entity=entity, fields=FIELD_LABELS_AR, error=None)
 
 
 @router.get("/entities/{entity_id}/template.xlsx")
 def download_template(request: Request, entity_id: str):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    entity = db.get_entity(entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
-    buf = build_template_workbook(entity_name=entity.name)
+    user = require_org_user(request, CAN_EDIT_DATA)
+    entity = _get_org_entity(entity_id, user)
+    buf = build_template_workbook(entity_name=entity["name"])
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -213,19 +313,12 @@ def download_template(request: Request, entity_id: str):
 
 @router.post("/entities/{entity_id}/runs/upload")
 async def submit_run_from_upload(request: Request, entity_id: str, file: UploadFile = File(...)):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    entity = db.get_entity(entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
+    user = require_org_user(request, CAN_EDIT_DATA)
+    entity = _get_org_entity(entity_id, user)
 
     def error_page(message: str, status_code: int = 400):
-        return templates.TemplateResponse(
-            "intake.html",
-            {"request": request, "user": user, "entity": entity, "fields": FIELD_LABELS_AR, "error": message},
-            status_code=status_code,
-        )
+        return render(request, "intake.html", user, status_code=status_code,
+                      entity=entity, fields=FIELD_LABELS_AR, error=message)
 
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         return error_page("الملف يجب أن يكون بصيغة xlsx/xlsm — استخدم القالب الرسمي.")
@@ -247,15 +340,13 @@ async def submit_run_from_upload(request: Request, entity_id: str, file: UploadF
     if any(not is_finite_non_negative(v) or v > MAX_AMOUNT for v in values.values()):
         return error_page("الملف يحتوي قيمة مالية غير صالحة (سالبة أو غير محدودة أو ضخمة جدًا)")
 
-    liquidity = compute_liquidity(values)
-    policy = load_policy()
-    allocation = run_allocation(values, liquidity, policy)
+    liquidity, allocation = compute_run(user["org_id"], values)
 
     run_id = _new_run_id(entity_id)
     dataset_hash = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
     db.insert_run(
         run_id, entity_id, parsed["period_start"], parsed["period_end"], dataset_hash,
-        values, liquidity, allocation, policy["policy_id"],
+        values, liquidity, allocation, allocation["policy_id"],
     )
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
@@ -276,12 +367,8 @@ def submit_run(
     other_short_term_due: float = Form(0),
     operational_reserve_target: float = Form(0),
 ):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    entity = db.get_entity(entity_id)
-    if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
+    user = require_org_user(request, CAN_EDIT_DATA)
+    entity = _get_org_entity(entity_id, user)
 
     values = {
         "opening_cash_balance": opening_cash_balance,
@@ -295,11 +382,8 @@ def submit_run(
         "operational_reserve_target": operational_reserve_target,
     }
     def intake_error(message: str):
-        return templates.TemplateResponse(
-            "intake.html",
-            {"request": request, "user": user, "entity": entity, "fields": FIELD_LABELS_AR, "error": message},
-            status_code=400,
-        )
+        return render(request, "intake.html", user, status_code=400,
+                      entity=entity, fields=FIELD_LABELS_AR, error=message)
 
     try:
         validate_period(period_start, period_end)
@@ -311,31 +395,23 @@ def submit_run(
                 f"القيمة غير صالحة لحقل \"{FIELD_LABELS_AR.get(key, key)}\": يجب أن تكون رقمًا غير سالب"
             )
 
-    liquidity = compute_liquidity(values)
-    policy = load_policy()
-    allocation = run_allocation(values, liquidity, policy)
+    liquidity, allocation = compute_run(user["org_id"], values)
 
     run_id = _new_run_id(entity_id)
     dataset_hash = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
-    db.insert_run(run_id, entity_id, period_start, period_end, dataset_hash, values, liquidity, allocation, policy["policy_id"])
+    db.insert_run(run_id, entity_id, period_start, period_end, dataset_hash, values, liquidity, allocation,
+                  allocation["policy_id"])
 
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
 @router.get("/runs/{run_id}")
 def run_result_page(request: Request, run_id: str):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    run = db.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    entity = db.get_entity(run["entity_id"])
+    user = require_org_user(request)
+    run = _get_org_run(run_id, user)
+    entity = _get_org_entity(run["entity_id"], user)
     review = db.get_review(run_id)
-    return templates.TemplateResponse(
-        "result.html",
-        {"request": request, "user": user, "run": run, "entity": entity, "review": review, "error": None},
-    )
+    return render(request, "result.html", user, run=run, entity=entity, review=review, error=None)
 
 
 @router.post("/runs/{run_id}/review")
@@ -343,30 +419,20 @@ def submit_review_form(
     request: Request,
     run_id: str,
     decision: str = Form(...),
-    decided_by: str = Form(..., max_length=100),
     justification: str = Form("", max_length=2000),
     override_bucket: str = Form(""),
     override_value: str = Form(""),
 ):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    run = db.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    entity = db.get_entity(run["entity_id"])
+    user = require_org_user(request, CAN_REVIEW)
+    run = _get_org_run(run_id, user)
+    entity = _get_org_entity(run["entity_id"], user)
 
     def result_error(message: str, status_code: int = 400):
-        return templates.TemplateResponse(
-            "result.html",
-            {"request": request, "user": user, "run": run, "entity": entity, "review": None, "error": message},
-            status_code=status_code,
-        )
+        return render(request, "result.html", user, status_code=status_code,
+                      run=run, entity=entity, review=None, error=message)
 
     if decision not in VALID_DECISIONS:
         return result_error("القرار يجب أن يكون Approve أو Modify أو Reject")
-    if not decided_by.strip():
-        return result_error("اسم المُراجِع مطلوب")
 
     override = None
     if override_bucket.strip() and override_value.strip():
@@ -381,21 +447,316 @@ def submit_review_form(
         except ValueError as e:
             return result_error(str(e))
 
-    # The typed name says who decided; the login says which account recorded it.
-    recorded_by = f"{decided_by.strip()} ({user})"
-    if not db.save_review(run_id, decision, override, justification or None, recorded_by, "PENDING"):
+    # Each person has their own account, so the login itself says who decided.
+    if not db.save_review(run_id, decision, override, justification or None, user["username"], "PENDING"):
         return result_error("تمت مراجعة هذه العملية مسبقًا — القرار الأول نهائي ولا يمكن استبداله", 409)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
 
 @router.get("/entities/{entity_id}/network-summary")
 def network_summary_page(request: Request, entity_id: str):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    summary = db.build_network_summary(entity_id)
+    user = require_org_user(request)
+    summary = db.build_network_summary(entity_id, org_id=user["org_id"])
     if summary is None:
         raise HTTPException(status_code=404, detail="Entity not found")
-    return templates.TemplateResponse(
-        "network_summary.html", {"request": request, "user": user, "summary": summary}
+    return render(request, "network_summary.html", user, summary=summary)
+
+
+# --- team (organization owner) ------------------------------------------------------
+def _team_page(request: Request, user: dict, error: Optional[str] = None, notice: Optional[str] = None,
+               status_code: int = 200):
+    return render(request, "team.html", user, status_code=status_code, error=error, notice=notice,
+                  members=db.list_users(org_id=user["org_id"]), org_roles=db.ORG_ROLES)
+
+
+def _new_account_problem(username: str, password: str) -> Optional[str]:
+    if not is_valid_username(username):
+        return "اسم المستخدم: 3 إلى 64 خانة من حروف إنجليزية صغيرة وأرقام و . _ @ - (يصلح البريد الإلكتروني)"
+    problem = password_problem(password)
+    if problem:
+        return problem
+    if db.get_user_by_username(username):
+        return "اسم المستخدم مستخدم — اختر اسمًا آخر"
+    return None
+
+
+def _get_team_member(user_id: str, owner: dict) -> dict:
+    member = db.get_user(user_id)
+    if not member or member["org_id"] != owner["org_id"]:
+        raise HTTPException(status_code=404, detail="User not found")
+    if member["id"] == owner["id"]:
+        raise HTTPException(status_code=400, detail="لا يمكنك تعديل حسابك من هنا — استخدم صفحة كلمة المرور")
+    return member
+
+
+@router.get("/team")
+def team_page(request: Request):
+    user = require_org_user(request, CAN_MANAGE_TEAM)
+    return _team_page(request, user)
+
+
+@router.post("/team/users")
+def team_add_user(
+    request: Request,
+    username: str = Form(..., max_length=200),
+    role: str = Form(...),
+    password: str = Form(..., max_length=1000),
+):
+    user = require_org_user(request, CAN_MANAGE_TEAM)
+    username = normalize_username(username)
+    if role not in db.ORG_ROLES:
+        return _team_page(request, user, error="الدور غير صالح", status_code=400)
+    problem = _new_account_problem(username, password)
+    if problem:
+        return _team_page(request, user, error=problem, status_code=400)
+    if not db.create_user(username, hash_password(password), org_id=user["org_id"], role=role):
+        return _team_page(request, user, error="اسم المستخدم مستخدم — اختر اسمًا آخر", status_code=400)
+    return _team_page(request, user, notice=f"أُضيف {username}. سيُطلب منه تغيير كلمة المرور المؤقتة عند أول دخول.")
+
+
+@router.post("/team/users/{user_id}/active")
+def team_set_active(request: Request, user_id: str, active: str = Form(...)):
+    user = require_org_user(request, CAN_MANAGE_TEAM)
+    member = _get_team_member(user_id, user)
+    db.set_user_active(member["id"], active == "1")
+    return RedirectResponse("/team", status_code=303)
+
+
+@router.post("/team/users/{user_id}/password")
+def team_reset_password(request: Request, user_id: str, password: str = Form(..., max_length=1000)):
+    user = require_org_user(request, CAN_MANAGE_TEAM)
+    member = _get_team_member(user_id, user)
+    problem = password_problem(password)
+    if problem:
+        return _team_page(request, user, error=problem, status_code=400)
+    db.set_password(member["id"], hash_password(password), must_change_password=True)
+    return _team_page(request, user, notice=f"أُعيد تعيين كلمة مرور {member['username']} وأُنهيت جلساته المفتوحة.")
+
+
+# --- platform admin -----------------------------------------------------------------
+def _admin_page(request: Request, user: dict, error: Optional[str] = None, notice: Optional[str] = None,
+                status_code: int = 200):
+    return render(request, "admin.html", user, status_code=status_code, error=error, notice=notice,
+                  organizations=db.list_organizations())
+
+
+@router.get("/admin")
+def admin_page(request: Request):
+    user = require_platform_admin(request)
+    return _admin_page(request, user)
+
+
+@router.post("/admin/organizations")
+def admin_create_organization(
+    request: Request,
+    name: str = Form(..., max_length=200),
+    owner_username: str = Form(..., max_length=200),
+    owner_password: str = Form(..., max_length=1000),
+):
+    user = require_platform_admin(request)
+    name, owner_username = name.strip(), normalize_username(owner_username)
+    if not name:
+        return _admin_page(request, user, error="اسم المنشأة مطلوب", status_code=400)
+    problem = _new_account_problem(owner_username, owner_password)
+    if problem:
+        return _admin_page(request, user, error=problem, status_code=400)
+    org_id = db.create_organization(name)
+    if not db.create_user(owner_username, hash_password(owner_password), org_id=org_id, role="owner"):
+        return _admin_page(request, user, error="اسم المستخدم مستخدم — أضف مالكًا للمنشأة باسم آخر", status_code=400)
+    return _admin_page(request, user, notice=f"أُنشئت المنشأة «{name}» ومالكها {owner_username}.")
+
+
+@router.post("/admin/organizations/{org_id}/owners")
+def admin_add_owner(
+    request: Request,
+    org_id: str,
+    username: str = Form(..., max_length=200),
+    password: str = Form(..., max_length=1000),
+):
+    user = require_platform_admin(request)
+    if not db.get_organization(org_id):
+        raise HTTPException(status_code=404, detail="Organization not found")
+    username = normalize_username(username)
+    problem = _new_account_problem(username, password)
+    if problem:
+        return _admin_page(request, user, error=problem, status_code=400)
+    if not db.create_user(username, hash_password(password), org_id=org_id, role="owner"):
+        return _admin_page(request, user, error="اسم المستخدم مستخدم — اختر اسمًا آخر", status_code=400)
+    return _admin_page(request, user, notice=f"أُضيف {username} مالكًا للمنشأة.")
+
+
+@router.post("/admin/organizations/{org_id}/status")
+def admin_set_organization_status(request: Request, org_id: str, status: str = Form(...)):
+    require_platform_admin(request)
+    if status not in ("active", "suspended"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    if not db.get_organization(org_id):
+        raise HTTPException(status_code=404, detail="Organization not found")
+    db.set_organization_status(org_id, status)
+    return RedirectResponse("/admin", status_code=303)
+
+
+# --- distribution plans ------------------------------------------------------------
+PLAN_STATUS_LABELS_AR = {
+    "draft": "مسودة",
+    "pending": "بانتظار الاعتماد",
+    "active": "معتمد (ساري)",
+    "superseded": "إصدار سابق",
+}
+PLAN_EVENT_LABELS_AR = {
+    "created": "أُنشئت المسودة",
+    "edited": "عُدّلت البنود",
+    "submitted": "أُرسلت للاعتماد",
+    "approved": "اعتُمدت وأصبحت سارية",
+    "rejected": "أُعيدت للتعديل",
+}
+BLANK_PLAN_ROWS = 3
+
+
+def _basis_options() -> list[tuple[str, str]]:
+    return [(BASIS_PERCENT, "نسبة % من التحصيلات"), (BASIS_FIXED, "مبلغ ثابت لكل فترة")] + [
+        (f"{BASIS_INPUT}:{field}", f"من بيانات الفترة: {label}") for field, label in INPUT_FIELD_LABELS_AR.items()
+    ]
+
+
+def _parse_plan_form(form) -> list[dict]:
+    """Rows come as parallel lists; blank-named rows are ignored and the rest are
+    ordered by their priority number (ties keep their on-screen order)."""
+    columns = [form.getlist(k) for k in ("line_name", "line_basis", "line_value", "line_protected", "line_order")]
+    if len({len(c) for c in columns}) != 1 or len(columns[0]) > MAX_LINES + BLANK_PLAN_ROWS:
+        raise ValueError("بيانات النموذج غير مكتملة — أعد تحميل الصفحة")
+    rows = []
+    for position, (name, basis, value, protected, order) in enumerate(zip(*columns)):
+        if not name.strip():
+            continue
+        try:
+            priority = float(order) if order.strip() else float(position + 1)
+            number = float(value) if value.strip() else None
+        except ValueError:
+            raise ValueError(f"«{name.strip()}»: الأولوية والقيمة يجب أن تكونا أرقامًا") from None
+        if not math.isfinite(priority):
+            raise ValueError(f"«{name.strip()}»: الأولوية غير صالحة")
+        kind, _, field = basis.partition(":")
+        rows.append((priority, position, {
+            "name": name, "basis": kind, "value": number, "input_field": field or None, "protected": protected == "1",
+        }))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return normalize_lines([r[2] for r in rows])
+
+
+def _submitted_rows(form) -> list[dict]:
+    """The rows as typed, for redisplay after a validation error."""
+    columns = [form.getlist(k) for k in ("line_name", "line_basis", "line_value", "line_protected")]
+    rows = []
+    for name, basis, value, protected in list(zip(*columns))[: MAX_LINES + BLANK_PLAN_ROWS]:
+        if name.strip():
+            kind, _, field = basis.partition(":")
+            rows.append({"name": name, "basis": kind, "value": value, "input_field": field or None,
+                         "protected": protected == "1"})
+    return rows
+
+
+def _plan_preview(plan: dict, org_id: str) -> Optional[dict]:
+    """How this version would have allocated the organization's latest period data."""
+    run = db.get_latest_org_run(org_id=org_id)
+    if not run:
+        return None
+    allocation = run_plan_allocation(run["inputs"], run["liquidity"], plan["lines"], plan_policy_id(plan))
+    return {"run": run, "allocation": allocation}
+
+
+def _plan_page(request: Request, user: dict, plan: dict, error: Optional[str] = None,
+               status_code: int = 200, lines: Optional[list] = None):
+    events = db.list_plan_events(plan["id"])
+    return render(
+        request, "plan.html", user, status_code=status_code, plan=plan, error=error,
+        lines=lines if lines is not None else plan["lines"], blank_rows=BLANK_PLAN_ROWS,
+        events=events, preview=_plan_preview(plan, user["org_id"]), basis_options=_basis_options(),
+        designers={e["actor"] for e in events if e["action"] in ("edited", "submitted")},
+        basis_label=basis_label, status_labels=PLAN_STATUS_LABELS_AR, event_labels=PLAN_EVENT_LABELS_AR,
+        last_rejection=next((e for e in reversed(events) if e["action"] == "rejected"), None)
+        if plan["status"] == "draft" else None,
     )
+
+
+def _get_org_plan(plan_id: str, user: dict) -> dict:
+    plan = db.get_plan(plan_id, org_id=user["org_id"])
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return plan
+
+
+@router.get("/plans")
+def plans_page(request: Request):
+    user = require_org_user(request)
+    org_id = user["org_id"]
+    active = db.get_active_plan(org_id)
+    return render(
+        request, "plans.html", user, active=active, open_plan=db.get_open_plan(org_id),
+        plans=db.list_plans(org_id), default_lines=None if active else default_lines(),
+        basis_label=basis_label, status_labels=PLAN_STATUS_LABELS_AR,
+    )
+
+
+@router.post("/plans")
+def plan_create_draft(request: Request):
+    user = require_org_user(request, CAN_DESIGN_PLAN)
+    active = db.get_active_plan(user["org_id"])
+    plan_id = db.create_draft_plan(user["org_id"], active["lines"] if active else default_lines(), user["username"])
+    if not plan_id:  # a version is already being worked on — continue with that one
+        open_plan = db.get_open_plan(user["org_id"])
+        return RedirectResponse(f"/plans/{open_plan['id']}" if open_plan else "/plans", status_code=303)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.get("/plans/{plan_id}")
+def plan_page(request: Request, plan_id: str):
+    user = require_org_user(request)
+    return _plan_page(request, user, _get_org_plan(plan_id, user))
+
+
+@router.post("/plans/{plan_id}/lines")
+async def plan_save_lines(request: Request, plan_id: str):
+    user = require_org_user(request, CAN_DESIGN_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    form = await request.form()
+    try:
+        lines = _parse_plan_form(form)
+    except ValueError as e:
+        return _plan_page(request, user, plan, error=str(e), status_code=400, lines=_submitted_rows(form))
+    if not db.update_draft_lines(plan_id, user["org_id"], lines, user["username"]):
+        return _plan_page(request, user, plan, error="لا يمكن تعديل هذا الإصدار — التعديل على المسودات فقط",
+                          status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/submit")
+def plan_submit(request: Request, plan_id: str):
+    user = require_org_user(request, CAN_DESIGN_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    if not db.submit_plan(plan_id, user["org_id"], user["username"]):
+        return _plan_page(request, user, plan, error="هذا الإصدار ليس مسودة", status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/approve")
+def plan_approve(request: Request, plan_id: str):
+    user = require_org_user(request, CAN_APPROVE_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    if plan["status"] == "pending" and user["username"] in db.plan_designers(plan_id):
+        return _plan_page(request, user, plan, status_code=403,
+                          error="لا يمكنك اعتماد إصدار شاركت في تعديله أو أرسلته — يلزم اعتماد مالك آخر (مصادقة من شخصين)")
+    if not db.approve_plan(plan_id, user["org_id"], user["username"]):
+        return _plan_page(request, user, plan, error="هذا الإصدار ليس بانتظار الاعتماد", status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)
+
+
+@router.post("/plans/{plan_id}/reject")
+def plan_reject(request: Request, plan_id: str, note: str = Form("", max_length=1000)):
+    user = require_org_user(request, CAN_APPROVE_PLAN)
+    plan = _get_org_plan(plan_id, user)
+    if not note.strip():
+        return _plan_page(request, user, plan, error="اكتب سبب الإعادة للتعديل", status_code=400)
+    if not db.reject_plan(plan_id, user["org_id"], user["username"], note.strip()):
+        return _plan_page(request, user, plan, error="هذا الإصدار ليس بانتظار الاعتماد", status_code=409)
+    return RedirectResponse(f"/plans/{plan_id}", status_code=303)

@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from app.api.routes_entities import router as api_entities_router
 from app.api.routes_runs import router as api_runs_router
+from app.auth import bootstrap_platform_admin
 from app.config import is_production, validate_config
 from app.db import get_db, init_db
 from app.ui.routes import router as ui_router
@@ -26,6 +27,7 @@ validate_config()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    bootstrap_platform_admin()
     yield
 
 

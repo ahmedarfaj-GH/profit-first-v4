@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}المنشآت — Profit First{% endblock %}
+{% block content %}
+<h1>المنشآت المشتركة</h1>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert notice">{{ notice }}</div>{% endif %}
+
+<section class="card">
+  <h2>إنشاء منشأة جديدة</h2>
+  <form method="post" action="/admin/organizations" class="grid-form">
+    <label>اسم المنشأة
+      <input type="text" name="name" required maxlength="200">
+    </label>
+    <label>اسم مستخدم المالك (أو بريده الإلكتروني)
+      <input type="text" name="owner_username" required maxlength="64" autocomplete="off">
+    </label>
+    <label>كلمة مرور مؤقتة للمالك (12 خانة على الأقل — سيغيّرها عند أول دخول)
+      <input type="password" name="owner_password" required minlength="12" autocomplete="new-password">
+    </label>
+    <button type="submit">إنشاء</button>
+  </form>
+  <p class="muted">المالك يضيف بقية فريقه بنفسه. أدمن المنصة لا يرى بيانات المنشآت المالية.</p>
+</section>
+
+<section class="card">
+  <h2>المنشآت الحالية</h2>
+  {% if not organizations %}
+  <p class="muted">لا توجد منشآت بعد.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>المنشأة</th><th>المستخدمون</th><th>الكيانات</th><th>الحالة</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for o in organizations %}
+      <tr>
+        <td>{{ o.name }}<br><span class="muted">{{ o.id }}</span></td>
+        <td>{{ o.user_count }}</td>
+        <td>{{ o.entity_count }}</td>
+        <td>
+          {% if o.status == "active" %}<span class="status-pill reviewed">نشطة</span>
+          {% else %}<span class="status-pill suspended">موقوفة</span>{% endif %}
+        </td>
+        <td class="actions">
+          <form method="post" action="/admin/organizations/{{ o.id }}/status" class="inline-form">
+            <input type="hidden" name="status" value="{{ 'suspended' if o.status == 'active' else 'active' }}">
+            <button type="submit">{{ "إيقاف" if o.status == "active" else "تفعيل" }}</button>
+          </form>
+          <form method="post" action="/admin/organizations/{{ o.id }}/owners" class="inline-form">
+            <input type="text" name="username" required maxlength="64" placeholder="مالك إضافي" autocomplete="off">
+            <input type="password" name="password" required minlength="12" placeholder="كلمة مرور مؤقتة" autocomplete="new-password">
+            <button type="submit">إضافة مالك</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

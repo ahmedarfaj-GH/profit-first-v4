@@ -3,6 +3,7 @@
 {% block content %}
 <h1>هرمية الكيانات</h1>
 
+{% if perms.edit_data %}
 <section class="card">
   <h2>إضافة كيان جديد</h2>
   <form method="post" action="/entities" class="grid-form">
@@ -35,11 +36,12 @@
     <button type="submit">إضافة</button>
   </form>
 </section>
+{% endif %}
 
 <section class="card">
   <h2>الكيانات الحالية</h2>
   {% if not entities %}
-  <p class="muted">لا يوجد كيانات بعد — أضف واحدًا من النموذج أعلاه.</p>
+  <p class="muted">لا يوجد كيانات بعد{% if perms.edit_data %} — أضف واحدًا من النموذج أعلاه{% endif %}.</p>
   {% else %}
   <table>
     <thead>
@@ -63,7 +65,7 @@
           {% endif %}
         </td>
         <td class="actions">
-          <a href="/entities/{{ e.id }}/new-run">إدخال بيانات فترة</a>
+          {% if perms.edit_data %}<a href="/entities/{{ e.id }}/new-run">إدخال بيانات فترة</a>{% endif %}
           {% if latest.get(e.id) %}
           <a href="/runs/{{ latest[e.id].run_id }}">آخر نتيجة</a>
           {% endif %}

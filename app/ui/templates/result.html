@@ -4,6 +4,7 @@
 <h1>نتيجة الحساب — {{ entity.name }}</h1>
 <p class="muted">
   {{ run.run_id }} · الفترة {{ run.period_start }} → {{ run.period_end }}
+  · التوزيع: {{ "السياسة الافتراضية" if run.policy_id == "AP-V1" else "جدول التوزيعات، الإصدار " ~ run.policy_id[4:] }}
   · بصمة البيانات: <code>{{ run.dataset_hash[:16] }}…</code>
 </p>
 
@@ -13,8 +14,12 @@
   <h2>السيولة</h2>
   <table class="kv">
     <tr><td>صافي النقد التشغيلي</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.net_operating_cash) }}</span></td></tr>
+    {% if run.liquidity.plan_targets_total is defined %}
+    <tr><td>إجمالي مستهدفات بنود جدول التوزيعات</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.plan_targets_total) }}</span></td></tr>
+    {% else %}
     <tr><td>إجمالي الالتزامات المستحقة</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.total_due_obligations) }}</span></td></tr>
     <tr><td>الاحتياطي التشغيلي المستهدف</td><td><span dir="ltr">{{ "%.2f"|format(run.liquidity.operational_reserve_target) }}</span></td></tr>
+    {% endif %}
     <tr class="highlight">
       <td>السيولة المتاحة المقدّرة</td>
       <td><span dir="ltr">{{ "%.2f"|format(run.liquidity.estimated_available_liquidity) }}</span></td>
@@ -36,6 +41,7 @@
       <div class="wf-label">
         {{ a.priority }}. {{ a.name_ar }}
         {% if a.protected %}<span class="lock" title="بند محمي">🔒</span>{% endif %}
+        {% if a.basis_label %}<div class="muted small">{{ a.basis_label }}</div>{% endif %}
       </div>
       <div class="wf-bar-track">
         {% if a.target %}
@@ -70,8 +76,10 @@
     {% if review.justification %}<tr><td>التبرير</td><td>{{ review.justification }}</td></tr>{% endif %}
     <tr><td>التوقيت</td><td>{{ review.decided_at }}</td></tr>
   </table>
+  {% elif not perms.review %}
+  <p class="muted">لم تتم المراجعة بعد. المراجعة من صلاحية المالك أو مدير الخزينة.</p>
   {% else %}
-  <p class="muted">لم تتم المراجعة بعد. أي بند محمي 🔒 لا يمكن تعديله بدون تبرير غير فارغ.</p>
+  <p class="muted">لم تتم المراجعة بعد. أي بند محمي 🔒 لا يمكن تعديله بدون تبرير غير فارغ. سيُسجَّل القرار باسم حسابك ({{ user.username }}).</p>
   <form method="post" action="/runs/{{ run.run_id }}/review" class="grid-form">
     <label>القرار
       <select name="decision" required>
@@ -79,9 +87,6 @@
         <option value="MODIFY">Modify</option>
         <option value="REJECT">Reject</option>
       </select>
-    </label>
-    <label>اسم المُراجِع
-      <input type="text" name="decided_by" required>
     </label>
     <label>بند التعديل (اختياري)
       <select name="override_bucket">

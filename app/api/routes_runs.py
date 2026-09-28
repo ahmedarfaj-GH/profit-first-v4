@@ -9,11 +9,15 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.auth import require_api_key
-from app.engine.allocation_engine import load_policy, run_allocation, validate_override
-from app.engine.liquidity_engine import compute_liquidity
+from app.allocation import compute_run
+from app.engine.allocation_engine import validate_override
 from app.validation import validate_period
 
 router = APIRouter(tags=["runs"])
+
+# The API key is platform-wide, so reads here span every organization
+# (org_id=None). Per-organization keys are tracked in plan.md.
+ALL_ORGS = None
 
 
 def _amount() -> float:
@@ -58,7 +62,7 @@ def _new_run_id(entity_id: str) -> str:
 
 @router.post("/entities/{entity_id}/snapshots", dependencies=[Depends(require_api_key)])
 def submit_snapshot(entity_id: str, snapshot: SnapshotIn):
-    entity = db.get_entity(entity_id)
+    entity = db.get_entity(entity_id, org_id=ALL_ORGS)
     if not entity:
         raise HTTPException(status_code=404, detail=f"Unknown entity_id: {entity_id}")
 
@@ -68,15 +72,13 @@ def submit_snapshot(entity_id: str, snapshot: SnapshotIn):
         raise HTTPException(status_code=422, detail=str(e))
 
     values = snapshot.inputs.model_dump()
-    liquidity = compute_liquidity(values)
-    policy = load_policy()
-    allocation = run_allocation(values, liquidity, policy)
+    liquidity, allocation = compute_run(entity["org_id"], values)
 
     run_id = _new_run_id(entity_id)
     dataset_hash = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
     db.insert_run(
         run_id, entity_id, snapshot.period_start, snapshot.period_end, dataset_hash,
-        values, liquidity, allocation, policy["policy_id"],
+        values, liquidity, allocation, allocation["policy_id"],
     )
 
     return {
@@ -93,7 +95,7 @@ def submit_snapshot(entity_id: str, snapshot: SnapshotIn):
 
 @router.get("/entities/{entity_id}/latest", dependencies=[Depends(require_api_key)])
 def get_latest(entity_id: str):
-    run = db.get_latest_run(entity_id)
+    run = db.get_latest_run(entity_id, org_id=ALL_ORGS)
     if not run:
         raise HTTPException(status_code=404, detail="No runs found for this entity")
     return run
@@ -101,7 +103,7 @@ def get_latest(entity_id: str):
 
 @router.get("/runs/{run_id}", dependencies=[Depends(require_api_key)])
 def get_run(run_id: str):
-    run = db.get_run(run_id)
+    run = db.get_run(run_id, org_id=ALL_ORGS)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     review = db.get_review(run_id)
@@ -112,7 +114,7 @@ def get_run(run_id: str):
 
 @router.post("/runs/{run_id}/review", dependencies=[Depends(require_api_key)])
 def submit_review(run_id: str, review: ReviewIn):
-    run = db.get_run(run_id)
+    run = db.get_run(run_id, org_id=ALL_ORGS)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 

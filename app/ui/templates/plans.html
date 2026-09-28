@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}جدول التوزيعات — Profit First{% endblock %}
+{% block content %}
+<h1>جدول التوزيعات</h1>
+<p class="muted">
+  يحدد كيف يُوزَّع النقد على الالتزامات بالأولوية. يصمّمه المحاسب أو المالك، ولا يسري إلا بعد اعتماد
+  مالكٍ لم يشارك في تعديله أو إرساله. كل عملية حساب جديدة تستخدم الإصدار الساري وقت إجرائها.
+</p>
+
+<section class="card">
+  {% if active %}
+  <h2>الإصدار الساري: {{ active.version }}</h2>
+  <p class="muted">اعتمده {{ active.approved_by }} · أرسله {{ active.submitted_by }} · {{ active.approved_at[:16]|replace("T", " ") }}</p>
+  {% set shown = active.lines %}
+  {% else %}
+  <h2>السياسة الافتراضية (AP-V1)</h2>
+  <p class="muted">لا يوجد جدول معتمد لمنشأتك بعد، فتُستخدم السياسة الافتراضية التالية. أول مسودة تبدأ منها.</p>
+  {% set shown = default_lines %}
+  {% endif %}
+  <table>
+    <thead><tr><th>الأولوية</th><th>البند</th><th>طريقة التحديد</th><th>محمي</th></tr></thead>
+    <tbody>
+      {% for line in shown %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ line.name }}</td>
+        <td>{{ basis_label(line) }}</td>
+        <td>{% if line.protected %}🔒{% endif %}</td>
+      </tr>
+      {% endfor %}
+      <tr><td>{{ shown|length + 1 }}</td><td>الفائض / الاستخدامات الاختيارية</td><td class="muted">ما يتبقى بعد كل البنود</td><td></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>التعديل</h2>
+  {% if open_plan %}
+  <p>
+    الإصدار {{ open_plan.version }} — <strong>{{ status_labels[open_plan.status] }}</strong>.
+    <a href="/plans/{{ open_plan.id }}">فتح الإصدار</a>
+  </p>
+  {% elif perms.design_plan %}
+  <form method="post" action="/plans" class="grid-form">
+    <p class="muted">تبدأ المسودة نسخةً من {{ "الإصدار الساري" if active else "السياسة الافتراضية" }}، ولا تؤثر على الحسابات حتى تُعتمد.</p>
+    <button type="submit">إنشاء مسودة جديدة</button>
+  </form>
+  {% else %}
+  <p class="muted">لا يوجد إصدار قيد التعديل. التصميم من صلاحية المحاسب أو المالك.</p>
+  {% endif %}
+</section>
+
+{% if plans %}
+<section class="card">
+  <h2>سجل الإصدارات</h2>
+  <table>
+    <thead><tr><th>الإصدار</th><th>الحالة</th><th>أنشأه</th><th>أرسله</th><th>اعتمده</th><th></th></tr></thead>
+    <tbody>
+      {% for p in plans %}
+      <tr>
+        <td>{{ p.version }}</td>
+        <td>{{ status_labels[p.status] }}</td>
+        <td>{{ p.created_by }}</td>
+        <td>{{ p.submitted_by or "—" }}</td>
+        <td>{{ p.approved_by or "—" }}</td>
+        <td><a href="/plans/{{ p.id }}">عرض</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}
