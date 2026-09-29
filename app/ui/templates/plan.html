@@ -83,7 +83,7 @@
 {% if plan.status == "draft" and perms.design_plan %}
 <section class="card">
   <h2>الإرسال للاعتماد</h2>
-  <p class="muted">بعد الإرسال لا يمكن التعديل إلا إذا أُعيد. يعتمده مالكٌ لم يشارك في تعديله، ثم يسري على الحسابات الجديدة.</p>
+  <p class="muted">بعد الإرسال لا يمكن التعديل إلا إذا أُعيد. يعتمده مالكٌ لم يشارك في تعديله (أو المالك الوحيد بنفسه إن لم يوجد غيره)، ثم يسري على الحسابات الجديدة.</p>
   <form method="post" action="/plans/{{ plan.id }}/submit"><button type="submit">إرسال للاعتماد</button></form>
 </section>
 {% endif %}
@@ -93,7 +93,7 @@
   <h2>الاعتماد</h2>
   {% if not perms.approve_plan %}
   <p class="muted">بانتظار اعتماد المالك.</p>
-  {% elif user.username in designers %}
+  {% elif user.username in designers and not sole_owner %}
   <p class="muted">شاركت في تعديل هذا الإصدار أو أرسلته، فيلزم أن يعتمده مالكٌ آخر (مصادقة من شخصين). أضف مالكًا ثانيًا من صفحة الفريق إن لم يوجد، أو أعده للتعديل.</p>
   <form method="post" action="/plans/{{ plan.id }}/reject" class="grid-form">
     <label>إعادة للتعديل مع السبب
@@ -102,6 +102,9 @@
     <button type="submit" class="secondary">إعادة للتعديل</button>
   </form>
   {% else %}
+  {% if user.username in designers %}
+  <p class="alert notice">أنت المالك الوحيد للمنشأة، فيمكنك اعتماد إصدار شاركت في تصميمه. سيُسجَّل ذلك في سجل الإصدار على أنه <strong>اعتماد ذاتي</strong>. عند إضافة مالك ثانٍ تعود المصادقة من شخصين.</p>
+  {% endif %}
   <p class="muted">راجع البنود والمعاينة أدناه. الاعتماد يجعل هذا الإصدار ساريًا فورًا ويحلّ محل الإصدار الحالي.</p>
   <form method="post" action="/plans/{{ plan.id }}/approve"><button type="submit">اعتماد</button></form>
   <form method="post" action="/plans/{{ plan.id }}/reject" class="grid-form">

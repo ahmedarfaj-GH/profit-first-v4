@@ -609,6 +609,7 @@ PLAN_EVENT_LABELS_AR = {
     "edited": "عُدّلت البنود",
     "submitted": "أُرسلت للاعتماد",
     "approved": "اعتُمدت وأصبحت سارية",
+    "self_approved": "اعتمدها المالك الوحيد بنفسه وأصبحت سارية (اعتماد ذاتي)",
     "rejected": "أُعيدت للتعديل",
 }
 BLANK_PLAN_ROWS = 3
@@ -674,6 +675,7 @@ def _plan_page(request: Request, user: dict, plan: dict, error: Optional[str] = 
         lines=lines if lines is not None else plan["lines"], blank_rows=BLANK_PLAN_ROWS,
         events=events, preview=_plan_preview(plan, user["org_id"]), basis_options=_basis_options(),
         designers={e["actor"] for e in events if e["action"] in ("edited", "submitted")},
+        sole_owner=user["role"] == "owner" and db.is_sole_owner(user["username"], user["org_id"]),
         basis_label=basis_label, status_labels=PLAN_STATUS_LABELS_AR, event_labels=PLAN_EVENT_LABELS_AR,
         last_rejection=next((e for e in reversed(events) if e["action"] == "rejected"), None)
         if plan["status"] == "draft" else None,
@@ -744,7 +746,8 @@ def plan_submit(request: Request, plan_id: str):
 def plan_approve(request: Request, plan_id: str):
     user = require_org_user(request, CAN_APPROVE_PLAN)
     plan = _get_org_plan(plan_id, user)
-    if plan["status"] == "pending" and user["username"] in db.plan_designers(plan_id):
+    if (plan["status"] == "pending" and user["username"] in db.plan_designers(plan_id)
+            and not db.is_sole_owner(user["username"], user["org_id"])):
         return _plan_page(request, user, plan, status_code=403,
                           error="لا يمكنك اعتماد إصدار شاركت في تعديله أو أرسلته — يلزم اعتماد مالك آخر (مصادقة من شخصين)")
     if not db.approve_plan(plan_id, user["org_id"], user["username"]):

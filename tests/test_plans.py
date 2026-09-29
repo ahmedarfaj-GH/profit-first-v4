@@ -275,3 +275,59 @@ def test_an_owner_who_edited_a_version_cannot_approve_it(team, db, org):
     post(team, f"/plans/{plan_id}/submit")
     login(team, "owner2")
     assert post(team, f"/plans/{plan_id}/approve").status_code == 303
+
+
+# --- sole owner --------------------------------------------------------------------
+def test_the_only_owner_may_approve_their_own_version_as_a_self_approval(client, db, org):
+    add_user(db, "solo", org, "owner")
+    login(client, "solo")
+    plan_id = new_draft(client)
+    post(client, f"/plans/{plan_id}/lines", form_for([RENT, VAT]))
+    post(client, f"/plans/{plan_id}/submit")
+    page = client.get(f"/plans/{plan_id}").text
+    assert "اعتماد ذاتي" in page and f'action="/plans/{plan_id}/approve"' in page
+
+    assert post(client, f"/plans/{plan_id}/approve").status_code == 303
+    plan = db.get_active_plan(org)
+    assert plan["id"] == plan_id and plan["approved_by"] == "solo"
+    assert [e["action"] for e in db.list_plan_events(plan_id)][-1] == "self_approved"
+    assert "اعتماد ذاتي" in client.get(f"/plans/{plan_id}").text
+
+
+def test_an_owner_approving_someone_elses_version_is_a_normal_approval(client, db, org):
+    add_user(db, "solo", org, "owner")
+    plan_id = db.create_draft_plan(org, normalize_lines([RENT]), "acct")
+    db.submit_plan(plan_id, org, "acct")
+    assert db.approve_plan(plan_id, org, "solo")
+    assert [e["action"] for e in db.list_plan_events(plan_id)][-1] == "approved"
+
+
+def test_a_second_owner_restores_the_two_person_rule(client, db, org):
+    add_user(db, "solo", org, "owner")
+    plan_id = db.create_draft_plan(org, normalize_lines([RENT]), "solo")
+    db.submit_plan(plan_id, org, "solo")
+    add_user(db, "partner", org, "owner")
+    assert not db.is_sole_owner("solo", org)
+    assert db.approve_plan(plan_id, org, "solo") is False
+    login(client, "solo")
+    refused = post(client, f"/plans/{plan_id}/approve")
+    assert refused.status_code == 403 and "مالك آخر" in refused.text
+
+
+def test_a_deactivated_second_owner_does_not_count(client, db, org):
+    add_user(db, "solo", org, "owner")
+    partner = add_user(db, "partner", org, "owner")
+    db.set_user_active(partner, False)
+    plan_id = db.create_draft_plan(org, normalize_lines([RENT]), "solo")
+    db.submit_plan(plan_id, org, "solo")
+    assert db.approve_plan(plan_id, org, "solo")
+
+
+def test_sole_owner_rule_is_per_organization(client, db, org):
+    add_user(db, "solo", org, "owner")
+    other = db.create_organization("منشأة أخرى")
+    add_user(db, "stranger", other, "owner")
+    plan_id = db.create_draft_plan(org, normalize_lines([RENT]), "stranger")
+    db.submit_plan(plan_id, org, "stranger")
+    assert db.is_sole_owner("stranger", other) and not db.is_sole_owner("stranger", org)
+    assert db.approve_plan(plan_id, org, "stranger") is False  # sole owner elsewhere, not here

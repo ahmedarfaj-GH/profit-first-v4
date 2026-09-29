@@ -662,28 +662,48 @@ def submit_plan(plan_id: str, org_id: str, actor: str) -> bool:
     return True
 
 
+# The approver is this organization's only active owner — nobody else could approve.
+_SOLE_OWNER_SQL = """(SELECT count(*) FROM users WHERE org_id=:o AND role='owner' AND is_active=1) = 1
+                      AND EXISTS (SELECT 1 FROM users WHERE org_id=:o AND username=:actor
+                                  AND role='owner' AND is_active=1)"""
+
+
 def approve_plan(plan_id: str, org_id: str, actor: str) -> bool:
     """Activates a pending version and supersedes the current one, atomically.
-    The approver must be neither its submitter nor anyone who edited it."""
+    The approver must be neither its submitter nor anyone who edited it — unless
+    they are the organization's only active owner, which is logged as a self-approval."""
     try:
         with get_db() as conn:
+            designed = conn.execute(
+                text("""SELECT 1 FROM distribution_plans WHERE id=:id AND org_id=:o AND submitted_by=:actor
+                        UNION SELECT 1 FROM plan_events WHERE plan_id=:id AND action='edited' AND actor=:actor"""),
+                {"id": plan_id, "o": org_id, "actor": actor},
+            ).first() is not None
             conn.execute(
                 text("UPDATE distribution_plans SET status='superseded' WHERE org_id=:o AND status='active'"),
                 {"o": org_id},
             )
             result = conn.execute(
-                text("""UPDATE distribution_plans SET status='active', approved_by=:actor, approved_at=:t
-                        WHERE id=:id AND org_id=:o AND status='pending' AND submitted_by <> :actor
-                          AND NOT EXISTS (SELECT 1 FROM plan_events
-                                          WHERE plan_id=:id AND action='edited' AND actor=:actor)"""),
+                text(f"""UPDATE distribution_plans SET status='active', approved_by=:actor, approved_at=:t
+                        WHERE id=:id AND org_id=:o AND status='pending'
+                          AND ((submitted_by <> :actor
+                                AND NOT EXISTS (SELECT 1 FROM plan_events
+                                                WHERE plan_id=:id AND action='edited' AND actor=:actor))
+                               OR ({_SOLE_OWNER_SQL}))"""),
                 {"actor": actor, "t": now_iso(), "id": plan_id, "o": org_id},
             )
             if result.rowcount != 1:
                 raise PlanTransitionRejected()
-            _add_plan_event(conn, plan_id, "approved", actor)
+            _add_plan_event(conn, plan_id, "self_approved" if designed else "approved", actor)
     except PlanTransitionRejected:
         return False
     return True
+
+
+def is_sole_owner(username: str, org_id: str) -> bool:
+    """True when this user is the organization's only active owner (may approve their own plan)."""
+    with get_db() as conn:
+        return conn.execute(text(f"SELECT 1 WHERE {_SOLE_OWNER_SQL}"), {"o": org_id, "actor": username}).first() is not None
 
 
 def reject_plan(plan_id: str, org_id: str, actor: str, note: str) -> bool:
